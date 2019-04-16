@@ -1,0 +1,4 @@
+/home/openark/CLionProjects/TSDF/build/CMakeFiles/edit_cache.dir
+/home/openark/CLionProjects/TSDF/build/CMakeFiles/rebuild_cache.dir
+/home/openark/CLionProjects/TSDF/build/CMakeFiles/demo.dir
+/home/openark/CLionProjects/TSDF/build/CMakeFiles/TSDF.dir
