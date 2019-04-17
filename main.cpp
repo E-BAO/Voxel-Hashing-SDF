@@ -74,7 +74,7 @@ int main(int argc, char** argv)
     string depthPath = folderPath +"depth/";
     string tcwPath = folderPath +"tcw/";
 
-    int tframe = 150;
+    int tframe = 100;
     int empty = 0;
 
 
@@ -83,7 +83,7 @@ int main(int argc, char** argv)
     float cam2world[4 * 4];
 
     // Read base frame camera pose
-    std::string base2world_file = tcwPath + "frame-000" + to_string(tframe) + ".pose" + ".txt";
+    std::string base2world_file = tcwPath + to_string(tframe) + ".txt";
     std::vector<float> base2world_vec = LoadMatrixFromFile(base2world_file, 4, 4);
     std::copy(base2world_vec.begin(), base2world_vec.end(), base2world);
 
@@ -93,14 +93,14 @@ int main(int argc, char** argv)
 
     float depth_im[height_ * width_];
 
-    while (tframe < 160) {
+    while (tframe < 150) {
 
         if(empty == 1)
             break;
 
         cout<<"frameLoad frame = "<<tframe<<endl;
         // Mat rgbBig = cv::imread(rgbPath + to_string(tframe) + ".png",cv::IMREAD_COLOR);
-        Mat rgbBig = cv::imread(rgbPath + "frame-000" + to_string(tframe) + ".color" + ".png",cv::IMREAD_COLOR);
+        cv::Mat rgbBig = cv::imread(rgbPath + to_string(tframe) + ".jpg",cv::IMREAD_COLOR);
 
         if(rgbBig.rows == 0){
             empty ++;
@@ -108,36 +108,64 @@ int main(int argc, char** argv)
             cout<< "load "<<tframe<<" fail"<<endl;
             continue;
         }
+        std::cout<<"--99-"<<std::endl;
 
+        cv::Mat imRGB;
 
-        // Mat depth255 = cv::imread(depthPath + to_string(tframe) + ".png", -1);
-        // depth255.convertTo(depth255, CV_32FC1);
-        ReadDepth(depthPath + "frame-000" + to_string(tframe) + ".depth" + ".png", height_, width_, depth_im);
+        cv::resize(rgbBig, imRGB, cv::Size(640,480));
+        std::cout<<"--77-"<<std::endl;
 
-        // Mat tcw;
-        string cam2world_file = tcwPath + "frame-000" + to_string(tframe) + ".pose" + ".txt";
-        std::vector<float> cam2world_vec = LoadMatrixFromFile(cam2world_file, 4, 4);
-        std::copy(cam2world_vec.begin(), cam2world_vec.end(), cam2world);
+        // rgbBig.release();
+ 
+        cv::Mat depth255 = cv::imread(depthPath + std::to_string(tframe) + ".png",-1);
+        cv::Mat imDepth;
+        depth255.convertTo(imDepth, CV_32FC1);
+        imDepth *= 0.001;
 
-        multiply_matrix(base2world_inv, cam2world, cam2base);
-
-        for(int i = 0; i < 16; i ++)
-          std::cout<<depth_im[i]<<" ";
-
+        std::cout<<"main depth = ";
+        for(int k = 0; k < 5; k ++){
+            printf("%lf ", imDepth.at<float>(k * 100,k * 100));
+        }
         std::cout<<std::endl;
 
-        mpGpuTsdfGenerator->processFrame(depth_im, (unsigned char *)rgbBig.datastart, cam2base);
+        std::cout<<"--55-"<<std::endl;
 
-        // cv::cvtColor(frame.imRGB, frame.imRGB, cv::COLOR_BGR2RGB);
+        // Mat tcw;
+        // string cam2world_file = tcwPath + to_string(tframe) + ".txt";
+        // std::vector<float> cam2world_vec = LoadMatrixFromFile(cam2world_file, 4, 4);
+        // std::copy(cam2world_vec.begin(), cam2world_vec.end(), cam2world);
+        // invert_matrix(cam2world, base2world_inv);
 
-        // pointCloudGenerator->OnKeyFrameAvailable(frame);
+
+        float tcwArr[4][4];
+        std::ifstream tcwFile;
+        tcwFile.open(tcwPath + std::to_string(tframe) + ".txt");
+        for (int i = 0; i < 4; ++i) {
+            for (int k = 0; k < 4; ++k) {
+                tcwFile >> tcwArr[i][k];
+            }
+        }
+        cv::Mat tcw(4, 4, CV_32FC1, tcwArr);    
+        cv::Mat Twc = tcw;//.inv();
+
+        // multiply_matrix(base2world_inv, cam2world, cam2base);
+
+
+        float cam2base[16];
+        for(int r=0;r<3;++r)
+            for(int c=0;c<4;++c)
+                cam2base[r*4+c] = Twc.at<float>(r,c);
+        cam2base[12] = 0.0f;
+        cam2base[13] = 0.0f;
+        cam2base[14] = 0.0f;
+        cam2base[15] = 1.0f;
+
+        mpGpuTsdfGenerator->processFrame((float *)imDepth.datastart, (unsigned char *)imRGB.datastart, cam2base);
 
         empty = 0;
 
         tframe ++ ;
     }
-
-    cout<<"processFrame"<<endl;
 
     mpGpuTsdfGenerator->SavePLY("model_online.ply");
 
