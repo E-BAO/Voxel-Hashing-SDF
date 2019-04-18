@@ -1,0 +1,12 @@
+*.lib
+*.cmake
+*.log
+.idea
+.DS_Store
+build
+lib
+Example
+scene0220_02
+CMakeCache.txt
+CMakeFiles
+README.md
