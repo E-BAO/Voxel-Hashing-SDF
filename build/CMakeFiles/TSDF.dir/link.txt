@@ -1,1 +1,0 @@
-/usr/bin/c++  -fPIC  -O3 -std=c++11  -shared -Wl,-soname,libTSDF.so -o ../lib/libTSDF.so CMakeFiles/TSDF.dir/TSDF_generated_tsdf.cu.o  -L/usr/local/cuda-10.0/lib64 /usr/local/cuda-10.0/lib64/libcudart_static.a -lpthread -ldl -lrt -Wl,-rpath,/usr/local/cuda-10.0/lib64 
