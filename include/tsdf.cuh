@@ -4,11 +4,44 @@
 #include "cuda.h"
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
+#include "vhashing.h"
 
 #include <string>
 #include <iostream>
 #include <cmath>
 #include <mutex>
+#include "cutil_math.h"
+
+
+#include <fstream>
+#include <vector>
+#include <list>
+#include <cstdlib>
+#include <unordered_map>
+#include <cstring>
+#include <GL/glew.h>
+#include <GL/glut.h>
+#include <utility>
+#include <random>
+
+
+#define T_PER_BLOCK 8
+
+//minus
+#ifndef MINF
+#define MINF __int_as_float(0xff800000)
+#endif
+
+//plus
+#ifndef PINF
+#define PINF __int_as_float(0x7f800000)
+#endif
+
+#define VOXEL_PER_BLOCK 4
+#define BLOCK_PER_CHUNK 8
+#define MAX_CPU2GPU_BLOCKS 100000
+#define MAX_CHUNK_NUM 128
+#define CHUNK_RADIUS 2.0
 
 __host__
 static void FatalError(const int lineNumber = 0) {
@@ -38,12 +71,10 @@ namespace ark {
         unsigned char b;
 
         __host__ __device__
-        Vertex() {}
-
+        Vertex(){}
         __host__ __device__
         Vertex(float xi, float yi, float zi) : x(xi), y(yi), z(zi) {}
     };
-
 
     struct Triangle {
         Vertex p[3];
@@ -59,6 +90,77 @@ namespace ark {
         float val[8];
     };
 
+    struct Voxel {
+        float sdf;
+        unsigned char sdf_color[3];
+        float weight;
+
+        __device__ __host__
+        Voxel():sdf(0), weight(0){
+            sdf_color[0] = sdf_color[1] = sdf_color[2] = 0;
+        }
+    };
+
+    struct VoxelBlock {
+        Voxel voxels[4*4*4];
+    };
+
+    struct VoxelBlockPos{
+        int3 pos;
+        // int idx;
+        __device__ __host__
+        VoxelBlockPos():pos(make_int3(0,0,0)){};
+    };
+
+    bool operator==(const VoxelBlock &a, const VoxelBlock &b);
+
+    struct BlockHasher {
+        __device__ __host__
+        size_t operator()(int3 patch) const {
+            const size_t p[] = {
+                73856093,
+                19349669,
+                83492791
+            };
+            return ((size_t)patch.x * p[0]) ^
+                         ((size_t)patch.y * p[1]) ^
+                         ((size_t)patch.z * p[2]);
+        }
+    };
+
+    struct BlockEqual {
+        __device__ __host__
+        bool operator()(int3 patch1, int3 patch2) const {
+            return patch1.x == patch2.x &&
+                            patch1.y == patch2.y &&
+                            patch1.z == patch2.z;
+        }
+    };
+
+    struct Chunk{
+        VoxelBlock *blocks;
+        VoxelBlockPos *blocksPos;
+        bool GPUorCPU; // CPU 0  GPU 1
+       __host__
+        Chunk():GPUorCPU(0), blocks(NULL), blocksPos(NULL){}
+
+        __host__
+        void create(int3 pos){
+            int block_total = BLOCK_PER_CHUNK * BLOCK_PER_CHUNK * BLOCK_PER_CHUNK;
+            if(blocks == NULL){
+                blocks = new VoxelBlock[block_total];
+            }
+            if(blocksPos == NULL){
+                blocksPos = new VoxelBlockPos[block_total];
+                for(int x = 0; x < BLOCK_PER_CHUNK; x ++)
+                    for(int y = 0; y < BLOCK_PER_CHUNK; y ++)
+                        for(int z = 0; z < BLOCK_PER_CHUNK; z++){
+                            blocksPos[(x * BLOCK_PER_CHUNK + y) * BLOCK_PER_CHUNK + z].pos = pos + make_int3(x,y,z);
+                        }
+            }
+        }
+    };
+
     class MarchingCubeParam {
     public:
         float3 vox_origin; // Location of voxel grid origin in base frame camera coordinates
@@ -67,6 +169,11 @@ namespace ark {
         int3 vox_dim;
         int total_vox;
         float max_depth;
+        float min_depth;
+        float block_size;
+        int im_width;
+        int im_height;
+        float fx, fy, cx, cy;
 
         int idxMap[8][3] = {{0, 0, 0},
                             {0, 1, 0},
@@ -374,6 +481,14 @@ namespace ark {
     __host__ __device__
     Vertex VertexInterp(float isolevel, Vertex p1, Vertex p2, float valp1, float valp2);
 
+    // typedef struct 
+    // {
+    //     float tsdf;
+    //     unsigned char tsdf_color;
+    //     Triangle tri;
+    //     float weight;
+    // }Voxel;
+
     class GpuTsdfGenerator {
         int im_width_;
         int im_height_;
@@ -386,6 +501,8 @@ namespace ark {
         float K_[3 * 3];
         float c2w_[4 * 4];
         Triangle *tri_ = nullptr;
+        float chunk_size;
+
 
         // Load variables to GPU memory
 
@@ -407,6 +524,23 @@ namespace ark {
         std::vector<Vertex> global_vertex;
         std::vector<Face> global_face;
         std::vector<std::list<std::pair<Vertex, int>>> global_map;
+
+
+//hashing host
+        Chunk* h_chunks;
+
+        VoxelBlock* d_outBlock;
+        VoxelBlockPos* d_outBlockPos;
+
+        VoxelBlock* d_inBlock;
+        VoxelBlockPos* d_inBlockPos;
+
+        VoxelBlockPos* d_inBlockPosHeap;
+
+        unsigned int *d_outBlockCounter;
+        unsigned int *d_heapBlockCounter;
+        unsigned int h_inChunkCounter;
+
     public:
         __host__
         GpuTsdfGenerator(int width, int height, float fx, float fy, float cx, float cy, float max_depth, float origin_x, float origin_y,
@@ -414,6 +548,12 @@ namespace ark {
 
         __host__
         void processFrame(float *depth, unsigned char *rgb, float *c2w);
+
+        __host__
+        void getLocalGrid();
+
+        __host__
+        void insert_tri();
 
         __host__
         void render();
@@ -454,6 +594,53 @@ namespace ark {
 
         __host__
         void insert_vertex(Vertex p, int index, uint3 grid_size, float cell_size, std::vector<std::list<std::pair<Vertex, int>>>& hash_table);
+    
+        __host__ 
+        void HashAssign(float *depth, const unsigned int height, const unsigned int width, 
+        MarchingCubeParam *param, float* K, float* c2w);
+
+        __host__ 
+        void HashReset();
+
+        __host__
+        bool isChunkInCameraFrustum(int x, int y, int z);
+
+        __host__ bool isPosInCameraFrustum(float x, float y, float z);
+
+        __host__ int chunkGetLinearIdx(int x, int  y, int z);
+
+        __host__ void streamInCPU2GPU(float *K, float *c2w, float *depth);
+
+        __host__ void streamOutGPU2CPU();
+
+        __host__ int3 world2chunk(float3 pos);
+
+        __host__ float3 getCameraPos();
+
+        __host__ void clearheap();
     };
+
+    // class TSDFHashMap
+    // {
+    //     thrust::host_vector<TSDF_tri*> data;
+    //     size_t my_size;
+    //     size_t capacity;
+
+    // public:
+    //     TSDFHashMap(size_t size);
+    //     ~ TSDFHashMap();
+    //     uint64_t getHash(int dim[3]);
+    //     bool insert(int dim[3], TSDF_tri* TSDF_tri_);
+    //     size_t size();
+    // };
+
+
+    // typedef struct 
+    // {
+    //     int position[3];
+    //     int offset;
+    //     Voxel* v;
+    // }HashEntry;
+
 }
 #endif

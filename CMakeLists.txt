@@ -32,11 +32,14 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Example)
 
 add_executable(load_frames src/main.cpp
         src/PointCloudGenerator.cpp
-        src/SaveFrame.cpp)
+        src/SaveFrame.cpp
+        src/safecall.cpp)
 
 target_link_libraries(load_frames 
     ${PROJECT_NAME}
     ${OpenCV_LIBS}
     ${PCL_LIBRARIES}
+    ${Boost_LIBRARIES}
+    glog
 	glut GL GLU GLEW)
 

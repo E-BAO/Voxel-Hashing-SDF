@@ -319,15 +319,19 @@ void motion_func(int x, int y) {
 }
 
 int main(int argc, char **argv) {
+        std::cout << "here" << std::endl;
+
     if (argc != 3) {
         cerr << endl << "Usage: ./load_frames path_to_frames path_to_settings" << endl;
         return 1;
     }
+    std::cout << "here" << std::endl;
 
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
     glutInitWindowSize(window_width, window_height);
     (void) glutCreateWindow("GLUT Program");
+    std::cout << "here" << std::endl;
 
     // Create SLAM system. It initializes all system threads and gets ready to process frames.
     pointCloudGenerator = new ark::PointCloudGenerator(argv[2]);

@@ -152,7 +152,7 @@ namespace ark {
     }
 
     RGBDFrame SaveFrame::frameLoad(int frameId){
-        std::cout<<"frameLoad frame = "<<frameId<<std::endl;
+        // std::cout<<"frameLoad frame = "<<frameId<<std::endl;
 //        if(frameId > 300)
 //            return;
         // std::unique_lock<std::mutex> lock(mKeyFrameMutex);
