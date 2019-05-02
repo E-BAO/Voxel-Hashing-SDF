@@ -5,8 +5,11 @@
 using std::vector;
 using std::default_random_engine;
 
-#define DEBUG_WIDTH 23
-#define DEBUG_HEIGHT 261
+#define DEBUG_WIDTH 32
+#define DEBUG_HEIGHT 24
+#define DEBUG_X  113
+#define DEBUG_Y  26
+#define DEBUG_Z  3
 // CUDA kernel function to integrate a TSDF voxel volume given depth images
 namespace ark {
     // static const int LOCK_HASH = -1;
@@ -294,7 +297,7 @@ namespace ark {
             for(int y = chunk_start.y; y <= chunk_end.y; y ++){
                 for(int z = chunk_start.z; z <= chunk_end.z; z++){
                     if(isChunkInCameraFrustum(x,y,z, frustumCenter)){
-                        printf("isChunkInCameraFrustum  %d %d %d\n", x, y, z);
+                        // printf("isChunkInCameraFrustum  %d %d %d\n", x, y, z);
                         int idChunk = chunkGetLinearIdx(x,y,z);
                         int3 stt = chunk2block(make_int3(x,y,z),0);
                         int3 endd = chunk2block(make_int3(x,y,z),block_total - 1);
@@ -303,15 +306,24 @@ namespace ark {
                             h_chunks[idChunk].create(make_int3(x,y,z));
                         }
 
-                        if(x == 2 && y == 1 && z == 0){
-                            printf("idChunk %d %d %d == %d of blocks from %d %d %d to %d %d %d \n",x, y, z,idChunk,stt.x,stt.y,stt.z, endd.x, endd.y, endd.z);
-                            printf("instore %d %d %d == %d of blocks from %d %d %d to %d %d %d \n",x, y, z,
-                                idChunk,
-                                h_chunks[idChunk].blocksPos[0].pos.x,h_chunks[idChunk].blocksPos[0].pos.y, h_chunks[idChunk].blocksPos[0].pos.z,
-                                h_chunks[idChunk].blocksPos[block_total-1].pos.x,
-                                h_chunks[idChunk].blocksPos[block_total-1].pos.y, 
-                                h_chunks[idChunk].blocksPos[block_total-1].pos.z);
-                        }
+                        // if(x == 2 && y == 1 && z == 0){
+                            printf("idChunk\t%d,%d,%d\t%d\tof\t%d,%d,%d\tto\t%d,%d,%d\n",x, y, z,idChunk,stt.x,stt.y,stt.z, endd.x, endd.y, endd.z);
+                            if(stt.x <= 17 && endd.x >= 17 &&
+                                stt.y <= 16 && endd.y >= 16 &&
+                                stt.z <= 4 && endd.z >= 4)
+                                printf("successfully 17 16 4\n");
+                            if(stt.x <= 24 && endd.x >= 24 &&
+                                stt.y <= 9 && endd.y >= 9 &&
+                                stt.z <= -1 && endd.z >= -1)
+                                printf("successfully 24 9 -1\n");
+
+                            // printf("instore %d %d %d == %d of blocks from %d %d %d to %d %d %d \n",x, y, z,
+                            //     idChunk,
+                            //     h_chunks[idChunk].blocksPos[0].pos.x,h_chunks[idChunk].blocksPos[0].pos.y, h_chunks[idChunk].blocksPos[0].pos.z,
+                            //     h_chunks[idChunk].blocksPos[block_total-1].pos.x,
+                            //     h_chunks[idChunk].blocksPos[block_total-1].pos.y, 
+                            //     h_chunks[idChunk].blocksPos[block_total-1].pos.z);
+                        // }
                         
 
                         // printf("cuda malloc total %d  max :% d\n", h_inChunkCounter, MAX_CPU2GPU_BLOCKS);
@@ -489,17 +501,39 @@ namespace ark {
             int pt_pix_x = pt_pix[0];
             int pt_pix_y = pt_pix[1];
 
-            if(pt_pix_x == DEBUG_WIDTH && pt_pix_y == DEBUG_HEIGHT){
-                float depth_val = depth[pt_pix_y * width + pt_pix_x];
-                float diff = depth_val - pt_cam_z;
+            // if(pt_pix_x == DEBUG_WIDTH && pt_pix_y == DEBUG_HEIGHT){
+            //     float depth_val = depth[pt_pix_y * width + pt_pix_x];
+            //     float diff = depth_val - pt_cam_z;
+            //     int3 idVoxel = world2voxel(make_float3(pt_base[0], pt_base[1], pt_base[2]), param->vox_size);
+            //     printf("idVoxel\t(%d,%d,%d)\tpos\t(%f,%f,%f)\tcamera\t(%f,%f,%f)\tscreen\t(%d,%d)\tdepth\t%f\tdiff\t%f\n",
+            //     idVoxel.x, idVoxel.y, idVoxel.z, 
+            //     pt_base[0], pt_base[1], pt_base[2], 
+            //     pt_cam_x, pt_cam_y, pt_cam_z,
+            //     pt_pix_x, pt_pix_y,
+            //     depth_val, diff);
 
-                printf("idVoxel\t(%d,%d,%d)\tpos\t(%f,%f,%f)\tcamera\t(%f,%f,%f)\tscreen\t(%d,%d)\tdepth\t%f\tdiff\t%f\n",
-                idVoxel.x, idVoxel.y, idVoxel.z, 
-                voxelpos.x, voxelpos.y, voxelpos.z, 
-                pt_cam_x, pt_cam_y, pt_cam_z,
-                pt_pix_x, pt_pix_y,
-                depth_val, diff);
-            }
+            //     if (pt_cam_z <= 0){
+            //         printf("1 %d <= 0\n", pt_cam_z);
+            //         return;
+            //     }
+
+
+            //     if (pt_pix_x < 0 || pt_pix_x >= width || pt_pix_y < 0 || pt_pix_y >= height){
+            //         printf("2  %d %d \n",pt_pix_x,pt_pix_y);
+            //         return;
+            //     }
+
+            //     if (depth_val <= 0 || depth_val > param->max_depth){
+            //         printf("3 %f %f\n", depth_val,  param->max_depth );
+            //         return;
+            //     }
+
+            //     if (diff <= -param->trunc_margin){
+            //         printf("4 %f %f\n", diff,  -param->trunc_margin);
+            //         return;
+            //     }
+
+            // }
 
 
             if (pt_cam_z <= 0)
@@ -518,6 +552,19 @@ namespace ark {
 
             if (diff <= -param->trunc_margin)
                 return;
+
+            if(pt_pix_x % DEBUG_WIDTH == 0 && pt_pix_y % DEBUG_HEIGHT == 0){
+                float depth_val = depth[pt_pix_y * width + pt_pix_x];
+                float diff = depth_val - pt_cam_z;
+                int3 idVoxel = world2voxel(make_float3(pt_base[0], pt_base[1], pt_base[2]), param->vox_size);
+                printf("good idVoxel\t(%d,%d,%d)\tpos\t(%f,%f,%f)\tcamera\t(%f,%f,%f)\tscreen\t(%d,%d)\tdepth\t%f\tdiff\t%f\n",
+                idVoxel.x, idVoxel.y, idVoxel.z, 
+                pt_base[0], pt_base[1], pt_base[2], 
+                pt_cam_x, pt_cam_y, pt_cam_z,
+                pt_pix_x, pt_pix_y,
+                depth_val, diff);
+                // printf("", diff,  -param->trunc_margin);
+            }
 
             // Integrate
             int image_idx = pt_pix_y * width + pt_pix_x;
@@ -588,21 +635,6 @@ namespace ark {
                 printf("%f %f %f ==== %f %f %f \n", base_pos[0], base_pos[1], base_pos[2], pt_base[0], pt_base[1], pt_base[2]);
             }
 
-            if(pt_pix_x == DEBUG_WIDTH && pt_pix_y == DEBUG_HEIGHT){
-                // int pt_pix_x = roundf(K[0 * 3 + 0] * (pt_cam_x / pt_cam_z) + K[0 * 3 + 2]);
-                // int pt_pix_y = roundf(K[1 * 3 + 1] * (pt_cam_y / pt_cam_z) + K[1 * 3 + 2]);
-                float depth_val = depth[pt_pix_y * width + pt_pix_x];
-                float diff = depth_val - pt_cam_z;
-                int3 idx3 = world2voxel(make_float3((float)pt_grid_x * param->vox_size - param->vox_origin.x, (float)pt_grid_y * param->vox_size - param->vox_origin.y, (float)pt_grid_z * param->vox_size - param->vox_origin.z), param->vox_size);
-                int3 idBlock = voxel2block(idx3);
-                printf("good pos\t(%f,%f,%f)\tblock\t(%d,%d,%d)\tvoxel\t(%d,%d,%d)\tcamera\t(%f,%f,%f)\tscreen\t(%d,%d)\tdepth\t%f\tdiff\t%f\n",
-                pt_base[0], pt_base[1], pt_base[2], 
-                idBlock.x, idBlock.y, idBlock.z,
-                idx3.x, idx3.y, idx3.z,
-                pt_cam_x, pt_cam_y, pt_cam_z,
-                pt_pix_x, pt_pix_y,
-                depth_val, diff);
-            }
 
             if (pt_cam_z <= 0)
                 continue;
@@ -621,6 +653,33 @@ namespace ark {
 
             if (diff <= -param->trunc_margin)
                 continue;
+
+            if(pt_pix_x % DEBUG_WIDTH == 0 && pt_pix_y % DEBUG_HEIGHT == 0){
+                // int pt_pix_x = roundf(K[0 * 3 + 0] * (pt_cam_x / pt_cam_z) + K[0 * 3 + 2]);
+                // int pt_pix_y = roundf(K[1 * 3 + 1] * (pt_cam_y / pt_cam_z) + K[1 * 3 + 2]);
+                float depth_val = depth[pt_pix_y * width + pt_pix_x];
+                float diff = depth_val - pt_cam_z;
+                int3 idx3 = world2voxel(make_float3((float)pt_base[0], (float)pt_base[1], (float)pt_base[2]), param->vox_size);
+                int3 idBlock = voxel2block(idx3);
+                printf("good pos\t(%f,%f,%f)\tblock\t(%d,%d,%d)\tvoxel\t(%d,%d,%d)\tcamera\t(%f,%f,%f)\tscreen\t(%d,%d)\tdepth\t%f\tdiff\t%f\n",
+                pt_base[0], pt_base[1], pt_base[2], 
+                idBlock.x, idBlock.y, idBlock.z,
+                idx3.x, idx3.y, idx3.z,
+                pt_cam_x, pt_cam_y, pt_cam_z,
+                pt_pix_x, pt_pix_y,
+                depth_val, diff);
+            }
+
+                // int3 idx3 = world2voxel(make_float3((float)pt_grid_x * param->vox_size, (float)pt_grid_y * param->vox_size, (float)pt_grid_z * param->vox_size), param->vox_size);
+                // int3 idBlock = voxel2block(idx3);
+                // printf("good pos\t(%f,%f,%f)\tblock\t(%d,%d,%d)\tvoxel\t(%d,%d,%d)\tcamera\t(%f,%f,%f)\tscreen\t(%d,%d)\tdepth\t%f\tdiff\t%f\n",
+                // pt_base[0], pt_base[1], pt_base[2], 
+                // idBlock.x, idBlock.y, idBlock.z,
+                // idx3.x, idx3.y, idx3.z,
+                // pt_cam_x, pt_cam_y, pt_cam_z,
+                // pt_pix_x, pt_pix_y,
+                // depth_val, diff);
+
 
             // Integrate
             int volume_idx = pt_grid_z * param->vox_dim.y * param->vox_dim.x + pt_grid_y * param->vox_dim.x + pt_grid_x;
@@ -684,10 +743,11 @@ namespace ark {
                 if(czi == z)
                     assert(idBlock.z == id_nb_block.z);
 
+                int linear_id = voxelLinearInBlock(make_int3(cxi, cyi,czi), id_nb_block);
+
                 if(dev_blockmap_.find(id_nb_block) != dev_blockmap_.end()){
                     grid.p[k] = Vertex(cxi, cyi, czi);
 
-                    int linear_id = voxelLinearInBlock(make_int3(cxi, cyi,czi), id_nb_block);
 
                     VoxelBlock& nb_block = dev_blockmap_[id_nb_block];
                     Voxel& nb_voxel = nb_block.voxels[linear_id];
@@ -697,12 +757,19 @@ namespace ark {
                     grid.p[k].b = nb_voxel.sdf_color[2];
                     grid.val[k] = nb_voxel.sdf;
 
-                    // printf("%d\tnbvoxel\t%d\t%d\t%d\tsdf=%f\n", linear_id, cxi, cyi, czi,voxel.sdf);
-                }else{
-                    // printf("no neighbor\n");
+                    if(x == DEBUG_X && y == DEBUG_Y && z == DEBUG_Z)
+                        printf("nbvoxel\t%d\t%d\t%d\tr%dg%db%d\tsdf%f\n", cxi, cyi, czi,grid.p[k].r,grid.p[k].g,grid.p[k].b, grid.val[k]);
                         // printf("%d\tnbvoxel\t%d\t%d\t%d\tsdf=%f\n", linear_id, cxi, cyi, czi,voxel.sdf);
-                    
-                    // return;
+                }else{
+                    // grid.p[k].r = 0;
+                    // grid.p[k].g = 0;
+                    // grid.p[k].b = 0;
+                    // grid.val[k] = 0;
+
+                    // if(x == DEBUG_X && y == DEBUG_Y && z == DEBUG_Z)
+                    // if(x % 4 == 0 && y % 4 == 0 && z % 4 == 0)
+                    return;
+                        printf("%d\tn_____l\t%d\t%d\t%d\tsdf=%f\n", linear_id, cxi, cyi, czi, grid.val[k]);
                 }
 
                 // if(pt_grid_x == 20 && pt_grid_y == 8 && pt_grid_z == 0){
@@ -724,9 +791,8 @@ namespace ark {
             if (param->edgeTable[cubeIndex] == 0)
                 return;
 
-
-            if(x % 5 == 0 && y % 7 == 0 && z % 13 == 0)
-                printf("\t%d\t%d\t%d\n", x, y, z);
+            // if(x == 95 && y == 63 && z == 21)
+            //     printf("\t%d\t%d\t%d\n", x, y, z);
 
             // printf("valid sdf\n");
 
@@ -785,6 +851,46 @@ namespace ark {
                 count++;
             }
 
+            if(x % 4 == 0 && y % 4 == 0 && z % 4 == 0){
+
+                for (int k = 0; k < 8; ++k) {
+                    int cxi = x + param->idxMap[k][0];
+                    int cyi = y + param->idxMap[k][1];
+                    int czi = z + param->idxMap[k][2];
+
+                    int3 id_nb_block = voxel2block(make_int3(cxi,cyi,czi));
+
+                    // printf("current block\t%d\t%d\t%d\tvoxel\t%d\t%d\t%d\tnbvoxel\t%d\t%d\t%d\tblock\t%d\t%d\t%d\n", idBlock.x, idBlock.y, idBlock.z, x, y, z, cxi, cyi, czi, id_nb_block.x, id_nb_block.y, id_nb_block.z);
+                    if(cxi == x)
+                        assert(idBlock.x == id_nb_block.x);
+                    if(cyi == y)
+                        assert(idBlock.y == id_nb_block.y);                
+                    if(czi == z)
+                        assert(idBlock.z == id_nb_block.z);
+
+                    int linear_id = voxelLinearInBlock(make_int3(cxi, cyi,czi), id_nb_block);
+
+                    if(dev_blockmap_.find(id_nb_block) != dev_blockmap_.end()){
+                        grid.p[k] = Vertex(cxi, cyi, czi);
+
+
+                        VoxelBlock& nb_block = dev_blockmap_[id_nb_block];
+                        Voxel& nb_voxel = nb_block.voxels[linear_id];
+
+                        grid.p[k].r = nb_voxel.sdf_color[0];
+                        grid.p[k].g = nb_voxel.sdf_color[1];
+                        grid.p[k].b = nb_voxel.sdf_color[2];
+                        grid.val[k] = nb_voxel.sdf;
+                        printf("hashmesh\t%d\t%d\t%d\tr%dg%db%d\tsdf%f\n", cxi, cyi, czi,grid.p[k].r,grid.p[k].g,grid.p[k].b, grid.val[k]);
+
+                    }
+                }
+
+            }
+
+            if(x == DEBUG_X && y == DEBUG_Y && z == DEBUG_Z)
+                printf("hashmesh\t%d\t%d\t%d\tcount=%d\n", x, y, z, count);
+
             // printf("count tri %d\n", index * 5 + count);
             assert(count != 0);
         }
@@ -800,8 +906,8 @@ namespace ark {
         for (int pt_grid_x = 0; pt_grid_x < param->vox_dim.x; ++pt_grid_x) {
             int index = global_index + pt_grid_x;
 
-                // if(pt_grid_x != 112 || pt_grid_y != 33 || pt_grid_z != 1)
-                //     return;
+            // if(pt_grid_x != 112 || pt_grid_y != 33 || pt_grid_z != 1)
+            //     return;
 
             GRIDCELL grid;
             for (int k = 0; k < 8; ++k) {
@@ -819,7 +925,8 @@ namespace ark {
                                    cyi * param->vox_dim.z +
                                    cxi];
 
-                // printf("111 33 1  tsdf %f \n", grid.val[k]);
+                if(pt_grid_x == DEBUG_X && pt_grid_y == DEBUG_Y && pt_grid_z == DEBUG_Z)
+                    printf("nbvoxel\t%d\t%d\t%d\tr%dg%db%d\tsdf%f\n", cxi, cyi, czi,grid.p[k].r,grid.p[k].g,grid.p[k].b, grid.val[k]);
 
             }
 
@@ -883,6 +990,33 @@ namespace ark {
                 tri[index * 5 + count].valid = true;
                 count++;
             }
+
+            // if(pt_grid_x == DEBUG_X && pt_grid_y == DEBUG_Y && pt_grid_z == DEBUG_Z)
+                // printf("mesh\t%d\t%d\t%d\tcount=%d\n", pt_grid_x, pt_grid_y, pt_grid_z, count);
+
+            if(pt_grid_x % 4 == 0 && pt_grid_y % 4 == 0 && pt_grid_z % 4 == 0){
+
+            for (int k = 0; k < 8; ++k) {
+                int cxi = pt_grid_x + param->idxMap[k][0];
+                int cyi = pt_grid_y + param->idxMap[k][1];
+                int czi = pt_grid_z + param->idxMap[k][2];
+                grid.p[k] = Vertex(cxi, cyi, czi);
+                grid.p[k].r = TSDF_color[3 * (czi * param->vox_dim.y * param->vox_dim.z +
+                                              cyi * param->vox_dim.z + cxi)];
+                grid.p[k].g = TSDF_color[
+                        3 * (czi * param->vox_dim.y * param->vox_dim.z + cyi * param->vox_dim.z + cxi) + 1];
+                grid.p[k].b = TSDF_color[
+                        3 * (czi * param->vox_dim.y * param->vox_dim.z + cyi * param->vox_dim.z + cxi) + 2];
+                grid.val[k] = TSDF[czi * param->vox_dim.y * param->vox_dim.z +
+                                   cyi * param->vox_dim.z +
+                                   cxi];
+
+                // if(pt_grid_x == DEBUG_X && pt_grid_y == DEBUG_Y && pt_grid_z == DEBUG_Z)
+                    // printf("mesh\t%d\t%d\t%d\tr%dg%db%d\tsdf%f\n", cxi, cyi, czi,grid.p[k].r,grid.p[k].g,grid.p[k].b, grid.val[k]);
+
+            }
+        }
+
             assert(count != 0);
         }
     }
@@ -1208,27 +1342,27 @@ namespace ark {
             printf("valid tri == %d \n", count);
         }
 
-        // getLocalGrid();
+        // // // getLocalGrid();
 
-        {
-            // std::unique_lock<std::mutex> lock(tsdf_mutex_);
-            // Integrate << < param_->vox_dim.z, param_->vox_dim.y >> >
-            //                                   (dev_K_, dev_c2w_, dev_depth_, dev_rgb_, im_height_, im_width_, dev_TSDF_, dev_TSDF_color_, dev_weight_, dev_param_);
+        // {
+        //     std::unique_lock<std::mutex> lock(tsdf_mutex_);
+        //     Integrate << < param_->vox_dim.z, param_->vox_dim.y >> >
+        //                                       (dev_K_, dev_c2w_, dev_depth_, dev_rgb_, im_height_, im_width_, dev_TSDF_, dev_TSDF_color_, dev_weight_, dev_param_);
 
-            // checkCUDA(__LINE__, cudaGetLastError());
+        //     checkCUDA(__LINE__, cudaGetLastError());
 
-            // cudaMemset(dev_tri_, 0, sizeof(Triangle) * param_->total_vox * 5);
-            // marchingCubeKernel << < param_->vox_dim.z, param_->vox_dim.y >> >
-            //                                            (dev_TSDF_, dev_TSDF_color_, dev_tri_, dev_param_);
-            // checkCUDA(__LINE__, cudaGetLastError());
-        }
+        //     cudaMemset(dev_tri_, 0, sizeof(Triangle) * param_->total_vox * 5);
+        //     marchingCubeKernel << < param_->vox_dim.z, param_->vox_dim.y >> >
+        //                                                (dev_TSDF_, dev_TSDF_color_, dev_tri_, dev_param_);
+        //     checkCUDA(__LINE__, cudaGetLastError());
+        // }
 
 
-        {
-            // std::unique_lock<std::mutex> lock(tri_mutex_);
-            // cudaMemcpy(tri_, dev_tri_, sizeof(Triangle) * param_->total_vox * 5, cudaMemcpyDeviceToHost);
-            // checkCUDA(__LINE__, cudaGetLastError());
-        }
+        // {
+        //     std::unique_lock<std::mutex> lock(tri_mutex_);
+        //     cudaMemcpy(tri_, dev_tri_, sizeof(Triangle) * param_->total_vox * 5, cudaMemcpyDeviceToHost);
+        //     checkCUDA(__LINE__, cudaGetLastError());
+        // }
     }
 
     __host__ 
@@ -1664,6 +1798,7 @@ namespace ark {
     }
 
     __device__ bool isBlockInCameraFrustum(float3 blocks_pos, float* c2w, MarchingCubeParam* param){
+        return true;
         // printf("device print\n");
         float3 pCamera = wolrd2cam(c2w, blocks_pos,param);
         float3 pProj = cameraToKinectProj(pCamera, param);

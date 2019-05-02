@@ -39,9 +39,9 @@
 
 #define VOXEL_PER_BLOCK 4
 #define BLOCK_PER_CHUNK 8
-#define MAX_CPU2GPU_BLOCKS 100000
+#define MAX_CPU2GPU_BLOCKS 1000000
 #define MAX_CHUNK_NUM 128
-#define CHUNK_RADIUS 4.0
+#define CHUNK_RADIUS 6.0
 
 __host__
 static void FatalError(const int lineNumber = 0) {
