@@ -202,7 +202,7 @@ void application_thread() {
     // Main loop
     int tframe = 0;
     int empty = 0;
-    while (true) {
+    while (tframe < 1) {
 
         if(empty == 5)
             break;

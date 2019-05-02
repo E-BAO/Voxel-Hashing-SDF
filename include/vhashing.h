@@ -40,6 +40,7 @@ struct HashTableBase {
 
   int     num_buckets;
   int     entries_per_bucket;
+  int 	  *heap_counter;
   uint32_t num_entries;
 
   Key emptyKey;
@@ -51,6 +52,7 @@ struct HashTableBase {
 
   HashEntry   *hash_table;
   int         *bucket_locks;
+  Key   	  *key_heap;
 
   BlockAlloc alloc;
 
@@ -68,7 +70,8 @@ struct HashTableBase {
 
     emptyKey(emptyKey),
     hasher(hasher),
-    isequal(equals)
+    isequal(equals),
+    heap_counter(0)
   {
 
   }
@@ -131,7 +134,7 @@ struct HashTableBase {
 	 *
 	 * */
 	__device__ __host__
-	iterator tryfind(const Key &k, bool readonly = false) const {
+	iterator tryfind(const Key &k, bool readonly = false) const {		
 		uint64_t hash = hasher(k);
 		int32_t bucket = hash % num_buckets;
 		detail::LockSet<2> lockset;
@@ -213,14 +216,13 @@ struct HashTableBase {
 					done = true;
 			}
 		}
-		// if (rv) {
-		// 	return *rv;
-		// }
-		// else {
-  //     		assert(false);
-		// 	return *((Value*)0);
-		// }
-		return *rv;
+		if (rv) {
+			return *rv;
+		}
+		else {
+      assert(false);
+			return *((Value*)0);
+		}
 	}
 
 	/**
@@ -399,7 +401,16 @@ struct HashTableBase {
 				entr.block_index = (block_index == -1) ? alloc.allocate() : alloc.offsets[block_index];
 				entr.offset = 0;
 				new (&alloc[entr.block_index]) Value(val);
-
+				int addr = 0;
+				#ifdef __CUDA_ARCH__
+					// __syncthreads();
+					addr = atomicAdd(&heap_counter[0], 1);
+					// __syncthreads();
+				#else
+						addr = (*heap_counter)++;
+				#endif
+				key_heap[addr] = k;
+				// printf("insert\tkey\t(%d\t%d\t%d)\tcounter\t%d\n", k.x, k.y, k.z,*heap_counter);
 				return &alloc[entr.block_index];
 			}
 		}
@@ -442,6 +453,16 @@ struct HashTableBase {
 				};
 				new (&alloc[hash_table[real_offset].block_index]) Value(val);
 				hash_table[offset].offset = rel_offset;
+				int addr = 0;
+				#ifdef __CUDA_ARCH__
+					// __syncthreads();
+						addr = atomicAdd(&heap_counter[0], 1);
+					// __syncthreads();
+				#else
+						addr = (*heap_counter)++;
+				#endif
+				key_heap[addr] = k;
+				// printf("insert\tkey\t(%d\t%d\t%d)\tcounter\t%d\n", k.x, k.y, k.z,*heap_counter);
 				return &alloc[hash_table[real_offset].block_index];
 			}
 		}
@@ -596,9 +617,12 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
 
   typename vector_type<typename parent_type::HashEntry, memspace>::type hash_table_shared;
   typename vector_type<int, memspace>::type bucket_locks_shared;
+  typename vector_type<int, memspace>::type heap_counter_shared;
 
   typename vector_type<Value, memspace>::type    data_shared;
   typename vector_type<int32_t, memspace>::type  offsets_shared;
+
+  typename vector_type<Key, memspace>::type 	key_heap_shared;
 
   template <typename T> using map_unique_ptr = std::unique_ptr<T, detail::memspace_deleter<memspace> >;
   typedef map_unique_ptr<typename parent_type::HashEntry> HashEntriesPtr;
@@ -614,7 +638,9 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
     hash_table_shared(num_buckets * entries_per_bucket, typename parent_type::HashEntry{emptyKey, 0, 0}),
     bucket_locks_shared(num_buckets, 0),
     data_shared(num_blocks + 1),
-    offsets_shared(num_blocks + 2)
+    offsets_shared(num_blocks + 2),
+    key_heap_shared(num_blocks + 1),
+    heap_counter_shared(1,0)
   {
     using thrust::raw_pointer_cast;
     /* prepare the hash table */
@@ -623,8 +649,12 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
     /* bucket locks */
     this->bucket_locks = raw_pointer_cast(&bucket_locks_shared[0]);
 
+    this->heap_counter = raw_pointer_cast(&heap_counter_shared[0]);
+
     /* allocator -- data*/
     this->alloc.data = raw_pointer_cast(&data_shared[0]);
+
+    this->key_heap = raw_pointer_cast(&key_heap_shared[0]);
 
     /* allocator -- offsets */
     thrust::sequence(
@@ -648,7 +678,9 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
     hash_table_shared(other.hash_table_shared),
     bucket_locks_shared(other.bucket_locks_shared),
     data_shared(other.data_shared),
-    offsets_shared(other.offsets_shared)
+    offsets_shared(other.offsets_shared),
+    key_heap_shared(other.key_heap_shared),
+    heap_counter_shared(other.heap_counter)
   {
     using thrust::raw_pointer_cast;
 
@@ -659,6 +691,9 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
 
     this->alloc.mutex = raw_pointer_cast(&offsets_shared[other.alloc.num_elems]);
     this->alloc.link_head = raw_pointer_cast(&offsets_shared[other.alloc.num_elems + 1]);
+    // this->heap_counter = other.heap_counter;
+    this->heap_counter = raw_pointer_cast(&heap_counter_shared[0]);
+    this->key_heap = raw_pointer_cast(&key_heap_shared[0]);
   }
   
   /* move constructor -- just use default */
@@ -676,7 +711,9 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
               typename parent_type::HashEntry{other.emptyKey, 0, 0}),
     bucket_locks_shared(other.num_buckets, 0),
     data_shared(other.alloc.num_elems + 1),
-    offsets_shared(other.alloc.num_elems + 2)
+    offsets_shared(other.alloc.num_elems + 2),
+    key_heap_shared(other.alloc.num_elems + 1),
+    heap_counter_shared(1,0)
   {
     using thrust::raw_pointer_cast;
     thrust::copy(
@@ -699,6 +736,17 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
         other.offsets_shared.end(),
         offsets_shared.begin()
         );
+    thrust::copy(
+        other.key_heap_shared.begin(),
+        other.key_heap_shared.end(),
+        key_heap_shared.begin()
+        );
+    thrust::copy(
+        other.heap_counter_shared.begin(),
+        other.heap_counter_shared.end(),
+        heap_counter_shared.begin()
+        );
+
     this->hash_table = raw_pointer_cast(&hash_table_shared[0]);
     this->bucket_locks = raw_pointer_cast(&bucket_locks_shared[0]);
     this->alloc.data = raw_pointer_cast(&data_shared[0]);
@@ -706,6 +754,10 @@ class HashTable : public HashTableBase<Key,Value,Hash,Equal> {
 
     this->alloc.mutex = raw_pointer_cast(&offsets_shared[other.alloc.num_elems]);
     this->alloc.link_head = raw_pointer_cast(&offsets_shared[other.alloc.num_elems + 1]);
+
+    // this->heap_counter = other.heap_counter;
+    this->heap_counter = raw_pointer_cast(&heap_counter_shared[0]);
+    this->key_heap = raw_pointer_cast(&key_heap_shared[0]);
   }
   
   //////// Bulk query functions

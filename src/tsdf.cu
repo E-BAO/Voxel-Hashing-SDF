@@ -5,9 +5,11 @@
 using std::vector;
 using std::default_random_engine;
 
+#define DEBUG_WIDTH 23
+#define DEBUG_HEIGHT 261
 // CUDA kernel function to integrate a TSDF voxel volume given depth images
 namespace ark {
-
+    // static const int LOCK_HASH = -1;
 
     //hashing device
     vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace>* dev_blockmap_chunks;
@@ -15,40 +17,102 @@ namespace ark {
     
     __device__ float3 voxel2world(int3 voxel, float voxel_size){
         float3 p;
-        p.x = ((float)voxel.x + 0.5) * voxel_size;
-        p.y = ((float)voxel.y + 0.5) * voxel_size;
-        p.z = ((float)voxel.z + 0.5) * voxel_size;
+        p.x = ((float)voxel.x) * voxel_size;
+        p.y = ((float)voxel.y) * voxel_size;
+        p.z = ((float)voxel.z) * voxel_size;
         return p;
     }
 
     __device__ int3 world2voxel(float3 voxelpos, float voxel_size){
         int3 p;
-        p.x = floor(voxelpos.x / voxel_size);
-        p.y = floor(voxelpos.y / voxel_size);
-        p.z = floor(voxelpos.z / voxel_size);
+        p.x = floorf(voxelpos.x / voxel_size);
+        p.y = floorf(voxelpos.y / voxel_size);
+        p.z = floorf(voxelpos.z / voxel_size);
         return p;
     }
 
     __device__ float3 block2world(int3 idBlock, float block_size){
         float3 p;
-        p.x = ((float)idBlock.x + 0.5) * block_size;
-        p.y = ((float)idBlock.y + 0.5) * block_size;
-        p.z = ((float)idBlock.z + 0.5) * block_size;
+        p.x = ((float)idBlock.x) * block_size;
+        p.y = ((float)idBlock.y) * block_size;
+        p.z = ((float)idBlock.z) * block_size;
         return p;
     }
 
     __device__ int3 wolrd2block(float3 blockpos, float block_size){
         int3 p;
-        p.x = floor(blockpos.x / block_size);
-        p.y = floor(blockpos.y / block_size);
-        p.z = floor(blockpos.z / block_size);
+        p.x = floorf(blockpos.x / block_size);
+        p.y = floorf(blockpos.y / block_size);
+        p.z = floorf(blockpos.z / block_size);
         return p;
     }
 
+    __device__ int3 voxel2block(int3 idVoxel){
+        return make_int3(floorf((float)idVoxel.x / (float)VOXEL_PER_BLOCK), floorf((float)idVoxel.y / (float)VOXEL_PER_BLOCK), floorf((float)idVoxel.z / (float)VOXEL_PER_BLOCK));
+    }
+
+    __device__ int voxelLinearInBlock(int3 idVoxel, int3 idBlock){
+        int3 start_id = make_int3(idBlock.x * VOXEL_PER_BLOCK, idBlock.y * VOXEL_PER_BLOCK, idBlock.z * VOXEL_PER_BLOCK);
+                    
+        return ((idVoxel.x - start_id.x) * VOXEL_PER_BLOCK + (idVoxel.y - start_id.y))* VOXEL_PER_BLOCK + (idVoxel.z - start_id.z);
+    }
+
+    //camera function
+    __host__    __device__
+    void frame2cam(int* pt_pix, float pt_cam_z, float* pt_cam, float* K_){
+        //convert bottom left of frame to current frame camera coordinates (camera)
+        pt_cam[2] = pt_cam_z;
+        pt_cam[0] = ((float)pt_pix[0] - K_[0 * 3 + 2]) * pt_cam_z / K_[0 * 3 + 0];
+        pt_cam[1] = ((float)pt_pix[1] - K_[1 * 3 + 2]) * pt_cam_z / K_[1 * 3 + 1];
+
+    }
+    __host__ __device__
+    void cam2frame(float* pt_cam, int *pt_pix, float* K){
+        pt_pix[0] = roundf(K[0 * 3 + 0] * (pt_cam[0] / pt_cam[2]) + K[0 * 3 + 2]);
+        pt_pix[1] = roundf(K[1 * 3 + 1] * (pt_cam[1] / pt_cam[2]) + K[1 * 3 + 2]);
+    }
+
+    __host__ __device__
+    void base2cam(float* pt_base,float *pt_cam, float * c2w_){
+        float tmp_pt[3] = {0};
+        tmp_pt[0] = pt_base[0] - c2w_[0 * 4 + 3];
+        tmp_pt[1] = pt_base[1] - c2w_[1 * 4 + 3];
+        tmp_pt[2] = pt_base[2] - c2w_[2 * 4 + 3];
+        pt_cam[0] =
+                c2w_[0 * 4 + 0] * tmp_pt[0] + c2w_[1 * 4 + 0] * tmp_pt[1] + c2w_[2 * 4 + 0] * tmp_pt[2];
+        pt_cam[1] =
+                c2w_[0 * 4 + 1] * tmp_pt[0] + c2w_[1 * 4 + 1] * tmp_pt[1] + c2w_[2 * 4 + 1] * tmp_pt[2];
+        pt_cam[2] =
+                c2w_[0 * 4 + 2] * tmp_pt[0] + c2w_[1 * 4 + 2] * tmp_pt[1] + c2w_[2 * 4 + 2] * tmp_pt[2];
+    }
+
+    __host__  __device__
+    void cam2base(float *pt_cam, float* pt_base, float * c2w_){
+        // Convert from current frame camera coordinates to base frame camera coordinates (wolrd)
+        pt_base[0] = pt_cam[0] * c2w_[0 * 4 + 0] + pt_cam[1] * c2w_[0 * 4 + 1] + pt_cam[2] * c2w_[0 * 4 + 2] + c2w_[0 * 4 + 3];
+        pt_base[1] = pt_cam[0] * c2w_[1 * 4 + 0] + pt_cam[1] * c2w_[1 * 4 + 1] + pt_cam[2] * c2w_[1 * 4 + 2] + c2w_[1 * 4 + 3];
+        pt_base[2] = pt_cam[0] * c2w_[2 * 4 + 0] + pt_cam[1] * c2w_[2 * 4 + 1] + pt_cam[2] * c2w_[2 * 4 + 2] + c2w_[2 * 4 + 3];
+
+        // //debug herererrere  origin
+        // pt_base[0] -= param->vox_origin.x;
+        // pt_base[1] -= param->vox_origin.y;
+        // pt_base[2] -= param->vox_origin.z;
+    }
+
+    __host__  __device__
+    float3 frame2base(int pt_pix_x, int pt_pix_y, float pt_cam_z, float* K_, float * c2w_, MarchingCubeParam *param){
+        float pt_cam[3];
+        int pt_pix[2] = {pt_pix_x, pt_pix_y};
+        frame2cam(pt_pix, pt_cam_z, pt_cam, K_);
+        float pt_base[3];
+        cam2base(pt_cam, pt_base, c2w_);
+        return make_float3(pt_base[0], pt_base[1], pt_base[2]);
+    }
+
     __host__ bool GpuTsdfGenerator::isPosInCameraFrustum(float x, float y, float z){
-        float pt_base_x = param_->vox_origin.x + x;
-        float pt_base_y = param_->vox_origin.y + y;
-        float pt_base_z = param_->vox_origin.z + z;
+        float pt_base_x = x;// param_->vox_origin.x + x;
+        float pt_base_y = y;//param_->vox_origin.y + y;
+        float pt_base_z = z;//param_->vox_origin.z + z;
 
         // Convert from base frame camera coordinates to current frame camera coordinates
         float tmp_pt[3] = {0};
@@ -77,18 +141,38 @@ namespace ark {
     }
 
     __host__ float3 GpuTsdfGenerator::getCameraPos(){
+        // return make_float3(c2w_[0 * 4 + 3] - param_->vox_origin.x,c2w_[1 * 4 + 3]- param_->vox_origin.y,c2w_[2 * 4 + 3]- param_->vox_origin.z);
         return make_float3(c2w_[0 * 4 + 3],c2w_[1 * 4 + 3],c2w_[2 * 4 + 3]);
     }
 
-    __host__ bool GpuTsdfGenerator::isChunkInCameraFrustum(int x, int y, int z){
+    __host__ float3 GpuTsdfGenerator::getFrustumCenter(){
+        // float3 getCameraPos();
+        int x = im_width_ / 2;
+        int y = im_height_ / 2;
+
+        float d = param_->max_depth / 2;
+
+        return frame2base(x,y,d, K_, c2w_, param_);
+        // printf("raymin\t%f\t%f\t%f\traymax \t%f\t%f\t%f\torigin\t%f\t%f\t%f\n", 
+        //         raymin.x, raymin.y, raymin.z, raymax.x, raymax.y, raymax.z, camcenter.x, camcenter.y, camcenter.z);
+    }
+
+    __host__ bool GpuTsdfGenerator::isChunkInCameraFrustum(int x, int y, int z, float3 frustumCenter){
+
         float3 chunk_center = make_float3(((float)x + 0.5) * chunk_size, ((float)y + 0.5) * chunk_size, ((float)z + 0.5) * chunk_size);
-        float3 cam_center = getCameraPos();
+        // float3 cam_center = getCameraPos();
         // printf("host: isChunkInCameraFrustum  %f %f %f\n", chunk_center.x, chunk_center.y, chunk_center.z);
 
-        float chunkRadius = 0.5f*CHUNK_RADIUS*sqrt(3.0f);
-        float3 vec = (cam_center - chunk_center);
+        float chunkRadius = 0.5f*CHUNK_RADIUS*sqrt(3.0f) * 1.1;
+        float3 vec = (frustumCenter - chunk_center);
         float l = sqrt(vec.x * vec.x + vec.z * vec.z + vec.y * vec.y);
         // printf("\t\t chunkRadius %f \t distance %f\n", chunkRadius, l);
+        // if(x == 4 && y == 3 && z == 1){
+        //     printf("4 3 1 chunk_center = (%f,%f,%f) dist = %f chunkRadius = %f\n", chunk_center.x, chunk_center.y, chunk_center.z, l,chunkRadius);
+        // }
+        // if(x == 2 && y == 1 && z == 1){
+        //     printf("2 1 1 chunk_center = (%f,%f,%f) dist = %f chunkRadius = %f\n", chunk_center.x, chunk_center.y, chunk_center.z, l,chunkRadius);
+        // }
 
         if(l <= std::abs(chunkRadius))
             return true;
@@ -101,7 +185,7 @@ namespace ark {
         int dimy = y + MAX_CHUNK_NUM / 2;
         int dimz = z + MAX_CHUNK_NUM / 2;
 
-        return (dimx * BLOCK_PER_CHUNK + dimy) * BLOCK_PER_CHUNK + dimz;
+        return (dimx * MAX_CHUNK_NUM + dimy) * MAX_CHUNK_NUM + dimz;
     }
 
     __host__ int3 GpuTsdfGenerator::world2chunk(float3 pos){
@@ -114,15 +198,56 @@ namespace ark {
         return p;
     }
 
-    __global__ void streamInCPU2GPUKernel(int h_inChunkCounter, VoxelBlock* d_inBlock, VoxelBlockPos* d_inBlockPos, vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace> dev_blockmap_chunks){
+    __global__ void streamInCPU2GPUKernel(int h_inChunkCounter, VoxelBlock* d_inBlock, VoxelBlockPos* d_inBlockPos, vhashing::HashTableBase<int3, VoxelBlock, BlockHasher, BlockEqual> dev_blockmap_chunks){
         const unsigned int bucketId = blockIdx.x * blockDim.x + threadIdx.x;
         // const uint total_vx_p_block = VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK;
         if(bucketId < h_inChunkCounter){
-            // printf("bucketId: %d of %f\n", bucketId, d_inBlock[bucketId].voxels[0].sdf);
-
-            // printf("bucketId: %d at %d %d %d\n", bucketId, d_inBlockPos[bucketId].pos.x, d_inBlockPos[bucketId].pos.y, d_inBlockPos[bucketId].pos.z);
-            dev_blockmap_chunks[d_inBlockPos[bucketId].pos] = d_inBlock[bucketId];
+            int3 pos = d_inBlockPos[bucketId].pos;
+            // printf("hash insert:%d %d %d\n", pos.x, pos.y, pos.z);
+            dev_blockmap_chunks[pos] = d_inBlock[bucketId];
         }
+    }
+
+
+    __global__ void checkStreamInKernel(vhashing::HashTableBase<int3, VoxelBlock, BlockHasher, BlockEqual> dev_blockmap_chunks){
+        const unsigned int bucketId = blockIdx.x * blockDim.x + threadIdx.x;
+
+            if(bucketId == 0){
+                if(dev_blockmap_chunks.find(make_int3(999,999,999)) != dev_blockmap_chunks.end())
+                    printf("insert successfully  (999,999,999)\n");
+                else
+                    printf("not 999 999 999\n");
+
+                VoxelBlock vb;
+                dev_blockmap_chunks[make_int3(999,999,999)] = vb;
+
+                if(dev_blockmap_chunks.find(make_int3(999,999,999)) != dev_blockmap_chunks.end())
+                    printf("insert successfully  (999,999,999)\n");
+                else
+                    printf("not 999 999 999\n");
+            }
+    }
+
+    __host__ int3 blockLinear2Int3(int idLinearBlock){
+        int z = idLinearBlock % BLOCK_PER_CHUNK;
+        int y = floor((idLinearBlock % (BLOCK_PER_CHUNK * BLOCK_PER_CHUNK))/BLOCK_PER_CHUNK);
+        int x = floor(idLinearBlock / (BLOCK_PER_CHUNK * BLOCK_PER_CHUNK));
+        return make_int3(x,y,z);
+    }
+
+    __host__ int3 chunk2block(int3 idChunk, int idLinearBlock){
+        int3 id = blockLinear2Int3(idLinearBlock);
+
+        int x = idChunk.x * BLOCK_PER_CHUNK + id.x;
+        int y = idChunk.y * BLOCK_PER_CHUNK + id.y;
+        int z = idChunk.z * BLOCK_PER_CHUNK + id.z;
+        return make_int3(x,y,z);
+    }
+
+    __host__ float3 chunk2world(int3 idChunk, float chunk_size){
+        return make_float3(((float)(idChunk.x) + 0.5)* chunk_size,
+            ((float)(idChunk.y) + 0.5)* chunk_size,
+            ((float)(idChunk.z) + 0.5)* chunk_size);
     }
 
     __host__ void GpuTsdfGenerator::streamInCPU2GPU(float *K, float *c2w, float *depth){
@@ -134,10 +259,19 @@ namespace ark {
 
         float3 cam_pos = getCameraPos();
         printf("cam_pos = %f %f %f\n", cam_pos.x, cam_pos.y, cam_pos.z);
+        int3 camera_ck = world2chunk(cam_pos);
+        printf("camera_chunk = %d %d %d \n", camera_ck.x, camera_ck.y, camera_ck.z);
+        
+        float3 frustumCenter = getFrustumCenter();
+        printf("frustumCenter = %f %f %f\n", frustumCenter.x, frustumCenter.y, frustumCenter.z);
 
-        int3 camera_chunk = world2chunk(cam_pos);
+        int3 camera_chunk = world2chunk(frustumCenter);
+
+        float3 chunk_center = chunk2world(camera_chunk, chunk_size);
         printf("MAX_CHUNK_NUM = %d chunk start from %d of size %f\n", MAX_CHUNK_NUM, -MAX_CHUNK_NUM/2, chunk_size);
-        printf("camera_chunk = %d %d %d\n", camera_chunk.x, camera_chunk.y, camera_chunk.z);
+        printf("frustum_chunk = %d %d %d  pos = %f %f %f block = %d %d %d \n", camera_chunk.x, camera_chunk.y, camera_chunk.z,
+            chunk_center.x, chunk_center.y, chunk_center.z,
+            camera_chunk.x * BLOCK_PER_CHUNK, camera_chunk.y * BLOCK_PER_CHUNK, camera_chunk.z * BLOCK_PER_CHUNK);
 
         int chunk_range_i = ceil(CHUNK_RADIUS/chunk_size); 
 
@@ -155,22 +289,32 @@ namespace ark {
 
         printf("chunk_end = %d %d %d\n", chunk_end.x, chunk_end.y, chunk_end.z);
 
-
-        std::cout<< "before chunk_start ===  clear " <<std::endl;
-        clearheap();
-
         //x y z  real pos idx
-        for(int x = chunk_start.x; x < chunk_end.x; x ++){
-            for(int y = chunk_start.y; y < chunk_end.y; y ++){
-                for(int z = chunk_start.z; z < chunk_end.z; z++){
-                    if(isChunkInCameraFrustum(x,y,z)){
+        for(int x = chunk_start.x; x <= chunk_end.x; x ++){   //should reach end   ======
+            for(int y = chunk_start.y; y <= chunk_end.y; y ++){
+                for(int z = chunk_start.z; z <= chunk_end.z; z++){
+                    if(isChunkInCameraFrustum(x,y,z, frustumCenter)){
                         printf("isChunkInCameraFrustum  %d %d %d\n", x, y, z);
                         int idChunk = chunkGetLinearIdx(x,y,z);
-                        printf("idChunk %d %d %d == %d create blocks\n",x, y, z,idChunk);
-                        
-                        h_chunks[idChunk].create(make_int3(x,y,z));
+                        int3 stt = chunk2block(make_int3(x,y,z),0);
+                        int3 endd = chunk2block(make_int3(x,y,z),block_total - 1);
 
-                        printf("cuda malloc total %d  max :% d\n", h_inChunkCounter, MAX_CPU2GPU_BLOCKS);
+                        if(h_chunks[idChunk].blocks == NULL){
+                            h_chunks[idChunk].create(make_int3(x,y,z));
+                        }
+
+                        if(x == 2 && y == 1 && z == 0){
+                            printf("idChunk %d %d %d == %d of blocks from %d %d %d to %d %d %d \n",x, y, z,idChunk,stt.x,stt.y,stt.z, endd.x, endd.y, endd.z);
+                            printf("instore %d %d %d == %d of blocks from %d %d %d to %d %d %d \n",x, y, z,
+                                idChunk,
+                                h_chunks[idChunk].blocksPos[0].pos.x,h_chunks[idChunk].blocksPos[0].pos.y, h_chunks[idChunk].blocksPos[0].pos.z,
+                                h_chunks[idChunk].blocksPos[block_total-1].pos.x,
+                                h_chunks[idChunk].blocksPos[block_total-1].pos.y, 
+                                h_chunks[idChunk].blocksPos[block_total-1].pos.z);
+                        }
+                        
+
+                        // printf("cuda malloc total %d  max :% d\n", h_inChunkCounter, MAX_CPU2GPU_BLOCKS);
                         cudaSafeCall(cudaMemcpy(d_inBlock + h_inChunkCounter,h_chunks[idChunk].blocks, sizeof(VoxelBlock) * block_total, cudaMemcpyHostToDevice));
                         cudaSafeCall(cudaMemcpy(d_inBlockPos + h_inChunkCounter,h_chunks[idChunk].blocksPos, sizeof(VoxelBlockPos) * block_total, cudaMemcpyHostToDevice));
                         h_chunks[idChunk].GPUorCPU = 1;
@@ -218,36 +362,55 @@ namespace ark {
             h_inBlock = (VoxelBlock *)malloc(sizeof(VoxelBlock) * h_inChunkCounter);
             cudaSafeCall(cudaMemcpy(h_inBlock, d_inBlock, sizeof(h_inBlock) * h_inChunkCounter, cudaMemcpyDeviceToHost));
 
-            for(int i = 0; i < h_inChunkCounter; i += 200){
-                printf("blockpos[%d] at %d %d %d\n", i, h_inBlockPos[i].pos.x,h_inBlockPos[i].pos.y,h_inBlockPos[i].pos.z);
-                printf("block[%d] of %f\n", i, h_inBlock[i].voxels[0].sdf);
-            }
-
-            
-            vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
-                bmh(*dev_blockmap_chunks);
-            std::cout<<" dev_blockmap_chunks copy "<<std::endl;
-
+            // for(int i = 0; i < h_inChunkCounter; i += 1000){
+            //     printf("blockpos[%d] at %d %d %d\n", i, h_inBlockPos[i].pos.x,h_inBlockPos[i].pos.y,h_inBlockPos[i].pos.z);
+            //     printf("block[%d] of %f\n", i, h_inBlock[i].voxels[0].sdf);
+            // }
 
             streamInCPU2GPUKernel<<<grid_size, block_size >>> (h_inChunkCounter, d_inBlock, d_inBlockPos, *dev_blockmap_chunks);
             // return;
             cudaSafeCall(cudaDeviceSynchronize()); //debug
 
-            printf("hehehe\n");
             // stream in
             vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
             bmhi(*dev_blockmap_chunks);
-            printf("yeyeye\n");
-            for(int i = 0; i < h_inChunkCounter; i += 200){
-                VoxelBlock vb = bmhi[h_inBlockPos[i].pos];
-                printf("vb = %f\n", vb.voxels[0].sdf);
-            }
+            // int count = 0;
+            // for(int i = 0; i < *(bmhi.heap_counter); i ++){
+            //     for(int j = 0; j < 4; j ++){
+            //         int offset = i * 4 + j;
+            //         vhashing::HashEntryBase<int3> &entr = bmhi.hash_table[offset];
+            //         int3 ii = entr.key;
+            //         if(ii.x == 999999 && ii.y == 999999 && ii.z == 999999 )
+            //             continue;
+            //         else{
+            //             count ++;
+            //         }
+            //     }
+            // }
+            printf("* get heap_counter %d \n", *(bmhi.heap_counter));
 
+            // int recount = 0;
+            // // stream in
+            // vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
+            // bmhhh(100001, 4, 400000, int3{999999, 999999, 999999});
 
+            // // check
+            // for (int i=0; i<*(bmhi.heap_counter); i++) {
+            //     int3 key = bmhi.key_heap[i];
+            //     // printf("key\t%d\t%d\t%d\n", key.x, key.y, key.z);
+            //     if(bmhhh.find(key) == bmhhh.end()){
+            //         VoxelBlock vb;
+            //         bmhhh[key] = vb;
+            //         recount ++;
+            //     }
+            // }
+
+            // printf("count out ==== %d\n", recount);
+            // for(int i = 0; i < h_inChunkCounter; i ++){
+            //     VoxelBlock vb = bmhi[h_inBlockPos[i].pos];
+            //     printf("pos = %d %d %d \n", h_inBlockPos[i].pos.x, h_inBlockPos[i].pos.y, h_inBlockPos[i].pos.z);
+            // }
         }
-
-        std::cout<< "after streamInCPU2GPUKernel ===  clear " <<std::endl;
-        clearheap();
     }
 
     __host__ void GpuTsdfGenerator::streamOutGPU2CPU(){
@@ -257,46 +420,92 @@ namespace ark {
 
     __global__ void IntegrateHashKernel(float *K, float *c2w, float *depth, unsigned char *rgb,
                    int height, int width, MarchingCubeParam *param,  
-                   vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace> dev_blockmap_,
+                   vhashing::HashTableBase<int3, VoxelBlock, BlockHasher, BlockEqual> dev_blockmap_,
                    VoxelBlockPos* d_inBlockPosHeap, unsigned int *d_heapBlockCounter){
 
-        printf("IntegrateHashKernel block %d  thread %d \n", blockIdx.x, threadIdx.x);
         unsigned int idheap = blockIdx.x;
+
+        // if(idheap != 80 || threadIdx.x != 0)
+        //     return;
+        // printf("heap\t%d\tvoxel\t%d\n",idheap, threadIdx.x);
         if(idheap < *d_heapBlockCounter){
-            int3 idBlock = d_inBlockPosHeap[idheap].pos;
+            int3 idBlock = dev_blockmap_.key_heap[idheap];
             VoxelBlock& vb = dev_blockmap_[idBlock];
             Voxel& voxel = vb.voxels[threadIdx.x];
 
             int VOXEL_PER_BLOCK2 = VOXEL_PER_BLOCK * VOXEL_PER_BLOCK;
             int z = threadIdx.x % VOXEL_PER_BLOCK;
-            int y = (threadIdx.x - z) % VOXEL_PER_BLOCK2;
+            int y = ((threadIdx.x - z) % VOXEL_PER_BLOCK2) / VOXEL_PER_BLOCK;
             int x = threadIdx.x / VOXEL_PER_BLOCK2;
+
+            // // printf("block\t%d\tthread\t%d\trank\t%d\tvoxel\t(%d,%d,%d)\n", blockIdx.x, threadIdx.x, blockIdx.x*blockDim.x+threadIdx.x, x, y, z);
 
             int3 idVoxel = idBlock * VOXEL_PER_BLOCK + make_int3(x,y,z);
 
             float3 voxelpos = voxel2world(idVoxel, param->vox_size);
 
-            float pt_base_x = param->vox_origin.x + voxelpos.x;
-            float pt_base_y = param->vox_origin.y + voxelpos.y;
-            float pt_base_z = param->vox_origin.z + voxelpos.z;
+            // float pt_base_x = param->vox_origin.x + voxelpos.x;
+            // float pt_base_y = param->vox_origin.y + voxelpos.y;
+            // float pt_base_z = param->vox_origin.z + voxelpos.z;
 
-            // Convert from base frame camera coordinates to current frame camera coordinates
+            // // Convert from base frame camera coordinates to current frame camera coordinates
+            // float tmp_pt[3] = {0};
+            // tmp_pt[0] = pt_base_x - c2w[0 * 4 + 3];
+            // tmp_pt[1] = pt_base_y - c2w[1 * 4 + 3];
+            // tmp_pt[2] = pt_base_z - c2w[2 * 4 + 3];
+            // float pt_cam_x =
+            //         c2w[0 * 4 + 0] * tmp_pt[0] + c2w[1 * 4 + 0] * tmp_pt[1] + c2w[2 * 4 + 0] * tmp_pt[2];
+            // float pt_cam_y =
+            //         c2w[0 * 4 + 1] * tmp_pt[0] + c2w[1 * 4 + 1] * tmp_pt[1] + c2w[2 * 4 + 1] * tmp_pt[2];
+            // float pt_cam_z =
+            //         c2w[0 * 4 + 2] * tmp_pt[0] + c2w[1 * 4 + 2] * tmp_pt[1] + c2w[2 * 4 + 2] * tmp_pt[2];
+
+            // int pt_pix_x = roundf(K[0 * 3 + 0] * (pt_cam_x / pt_cam_z) + K[0 * 3 + 2]);
+            // int pt_pix_y = roundf(K[1 * 3 + 1] * (pt_cam_y / pt_cam_z) + K[1 * 3 + 2]);
+                        // Convert from base frame camera coordinates to current frame camera coordinates
+            float pt_base[3] = {voxelpos.x + param->vox_origin.x, 
+            voxelpos.y + param->vox_origin.y, voxelpos.z + param->vox_origin.z};// voxel2world(idVoxel, param->vox_size);
+
             float tmp_pt[3] = {0};
-            tmp_pt[0] = pt_base_x - c2w[0 * 4 + 3];
-            tmp_pt[1] = pt_base_y - c2w[1 * 4 + 3];
-            tmp_pt[2] = pt_base_z - c2w[2 * 4 + 3];
+            tmp_pt[0] = pt_base[0] - c2w[0 * 4 + 3];
+            tmp_pt[1] = pt_base[1] - c2w[1 * 4 + 3];
+            tmp_pt[2] = pt_base[2] - c2w[2 * 4 + 3];
             float pt_cam_x =
                     c2w[0 * 4 + 0] * tmp_pt[0] + c2w[1 * 4 + 0] * tmp_pt[1] + c2w[2 * 4 + 0] * tmp_pt[2];
             float pt_cam_y =
                     c2w[0 * 4 + 1] * tmp_pt[0] + c2w[1 * 4 + 1] * tmp_pt[1] + c2w[2 * 4 + 1] * tmp_pt[2];
             float pt_cam_z =
                     c2w[0 * 4 + 2] * tmp_pt[0] + c2w[1 * 4 + 2] * tmp_pt[1] + c2w[2 * 4 + 2] * tmp_pt[2];
+            float pt_cam[3] = {pt_cam_x, pt_cam_y, pt_cam_z};
+
+            base2cam(pt_base, pt_cam, c2w);
+            pt_cam_x = pt_cam[0];
+            pt_cam_y = pt_cam[1];
+            pt_cam_z = pt_cam[2];
+
+            int pt_pix[2];
+            cam2frame(pt_cam, pt_pix, K);
+
+            int pt_pix_x = pt_pix[0];
+            int pt_pix_y = pt_pix[1];
+
+            if(pt_pix_x == DEBUG_WIDTH && pt_pix_y == DEBUG_HEIGHT){
+                float depth_val = depth[pt_pix_y * width + pt_pix_x];
+                float diff = depth_val - pt_cam_z;
+
+                printf("idVoxel\t(%d,%d,%d)\tpos\t(%f,%f,%f)\tcamera\t(%f,%f,%f)\tscreen\t(%d,%d)\tdepth\t%f\tdiff\t%f\n",
+                idVoxel.x, idVoxel.y, idVoxel.z, 
+                voxelpos.x, voxelpos.y, voxelpos.z, 
+                pt_cam_x, pt_cam_y, pt_cam_z,
+                pt_pix_x, pt_pix_y,
+                depth_val, diff);
+            }
+
 
             if (pt_cam_z <= 0)
                 return;
 
-            int pt_pix_x = roundf(K[0 * 3 + 0] * (pt_cam_x / pt_cam_z) + K[0 * 3 + 2]);
-            int pt_pix_y = roundf(K[1 * 3 + 1] * (pt_cam_y / pt_cam_z) + K[1 * 3 + 2]);
+
             if (pt_pix_x < 0 || pt_pix_x >= width || pt_pix_y < 0 || pt_pix_y >= height)
                 return;
 
@@ -320,6 +529,10 @@ namespace ark {
             voxel.sdf_color[0] = (voxel.sdf_color[0] * weight_old + rgb[3 * image_idx]) / weight_new;
             voxel.sdf_color[1] = (voxel.sdf_color[1] * weight_old + rgb[3 * image_idx + 1]) / weight_new;
             voxel.sdf_color[2] = (voxel.sdf_color[2] * weight_old + rgb[3 * image_idx + 2]) / weight_new;
+
+            // if(idheap == 100)
+            //     printf("sdf\t%f\tcolor\t%d\t%d\t%d\tweight%f\n", voxel.sdf,voxel.sdf_color[0],voxel.sdf_color[1],voxel.sdf_color[2],voxel.weight);
+
         }
     }
 
@@ -334,27 +547,68 @@ namespace ark {
         for (int pt_grid_x = 0; pt_grid_x < param->vox_dim.x; ++pt_grid_x) {
 
             // Convert voxel center from grid coordinates to base frame camera coordinates
-            float pt_base_x = param->vox_origin.x + pt_grid_x * param->vox_size;
-            float pt_base_y = param->vox_origin.y + pt_grid_y * param->vox_size;
-            float pt_base_z = param->vox_origin.z + pt_grid_z * param->vox_size;
+            float pt_base[3];
+            // pt_base[0] = pt_grid_x * param->vox_size;//param->vox_origin.x + pt_grid_x * param->vox_size;
+            // pt_base[1] = pt_grid_y * param->vox_size;//param->vox_origin.y + pt_grid_y * param->vox_size;
+            // pt_base[2] = pt_grid_z * param->vox_size;//param->vox_origin.z + pt_grid_z * param->vox_size;
+            pt_base[0] = param->vox_origin.x + pt_grid_x * param->vox_size;
+            pt_base[1] = param->vox_origin.y + pt_grid_y * param->vox_size;
+            pt_base[2] = param->vox_origin.z + pt_grid_z * param->vox_size;
 
             // Convert from base frame camera coordinates to current frame camera coordinates
             float tmp_pt[3] = {0};
-            tmp_pt[0] = pt_base_x - c2w[0 * 4 + 3];
-            tmp_pt[1] = pt_base_y - c2w[1 * 4 + 3];
-            tmp_pt[2] = pt_base_z - c2w[2 * 4 + 3];
+            tmp_pt[0] = pt_base[0] - c2w[0 * 4 + 3];
+            tmp_pt[1] = pt_base[1] - c2w[1 * 4 + 3];
+            tmp_pt[2] = pt_base[2] - c2w[2 * 4 + 3];
             float pt_cam_x =
                     c2w[0 * 4 + 0] * tmp_pt[0] + c2w[1 * 4 + 0] * tmp_pt[1] + c2w[2 * 4 + 0] * tmp_pt[2];
             float pt_cam_y =
                     c2w[0 * 4 + 1] * tmp_pt[0] + c2w[1 * 4 + 1] * tmp_pt[1] + c2w[2 * 4 + 1] * tmp_pt[2];
             float pt_cam_z =
                     c2w[0 * 4 + 2] * tmp_pt[0] + c2w[1 * 4 + 2] * tmp_pt[1] + c2w[2 * 4 + 2] * tmp_pt[2];
+            float pt_cam[3] = {pt_cam_x, pt_cam_y, pt_cam_z};
+
+            base2cam(pt_base, pt_cam, c2w);
+            pt_cam_x = pt_cam[0];
+            pt_cam_y = pt_cam[1];
+            pt_cam_z = pt_cam[2];
+
+            int pt_pix[2];
+            cam2frame(pt_cam, pt_pix, K);
+
+            int pt_pix_x = pt_pix[0];//roundf(K[0 * 3 + 0] * (pt_cam_x / pt_cam_z) + K[0 * 3 + 2]);
+            int pt_pix_y = pt_pix[1];//roundf(K[1 * 3 + 1] * (pt_cam_y / pt_cam_z) + K[1 * 3 + 2]);
+
+            if(pt_grid_z == 10 && pt_grid_y == 20 && pt_grid_x == 30){
+                float cam_pos[3];
+                frame2cam(pt_pix, pt_cam_z, cam_pos, K);
+                printf("%f %f %f ==== %f %f %f \n", cam_pos[0], cam_pos[1], cam_pos[2], pt_cam[0], pt_cam[1], pt_cam[2]);
+                float base_pos[3];
+                cam2base(cam_pos, base_pos, c2w);
+                printf("%f %f %f ==== %f %f %f \n", base_pos[0], base_pos[1], base_pos[2], pt_base[0], pt_base[1], pt_base[2]);
+            }
+
+            if(pt_pix_x == DEBUG_WIDTH && pt_pix_y == DEBUG_HEIGHT){
+                // int pt_pix_x = roundf(K[0 * 3 + 0] * (pt_cam_x / pt_cam_z) + K[0 * 3 + 2]);
+                // int pt_pix_y = roundf(K[1 * 3 + 1] * (pt_cam_y / pt_cam_z) + K[1 * 3 + 2]);
+                float depth_val = depth[pt_pix_y * width + pt_pix_x];
+                float diff = depth_val - pt_cam_z;
+                int3 idx3 = world2voxel(make_float3((float)pt_grid_x * param->vox_size - param->vox_origin.x, (float)pt_grid_y * param->vox_size - param->vox_origin.y, (float)pt_grid_z * param->vox_size - param->vox_origin.z), param->vox_size);
+                int3 idBlock = voxel2block(idx3);
+                printf("good pos\t(%f,%f,%f)\tblock\t(%d,%d,%d)\tvoxel\t(%d,%d,%d)\tcamera\t(%f,%f,%f)\tscreen\t(%d,%d)\tdepth\t%f\tdiff\t%f\n",
+                pt_base[0], pt_base[1], pt_base[2], 
+                idBlock.x, idBlock.y, idBlock.z,
+                idx3.x, idx3.y, idx3.z,
+                pt_cam_x, pt_cam_y, pt_cam_z,
+                pt_pix_x, pt_pix_y,
+                depth_val, diff);
+            }
 
             if (pt_cam_z <= 0)
                 continue;
 
-            int pt_pix_x = roundf(K[0 * 3 + 0] * (pt_cam_x / pt_cam_z) + K[0 * 3 + 2]);
-            int pt_pix_y = roundf(K[1 * 3 + 1] * (pt_cam_y / pt_cam_z) + K[1 * 3 + 2]);
+            // int pt_pix_x = roundf(K[0 * 3 + 0] * (pt_cam_x / pt_cam_z) + K[0 * 3 + 2]);
+            // int pt_pix_y = roundf(K[1 * 3 + 1] * (pt_cam_y / pt_cam_z) + K[1 * 3 + 2]);
             if (pt_pix_x < 0 || pt_pix_x >= width || pt_pix_y < 0 || pt_pix_y >= height)
                 continue;
 
@@ -381,6 +635,158 @@ namespace ark {
                     (TSDF_color[volume_idx * 3 + 1] * weight_old + rgb[3 * image_idx + 1]) / weight_new;
             TSDF_color[volume_idx * 3 + 2] =
                     (TSDF_color[volume_idx * 3 + 2] * weight_old + rgb[3 * image_idx + 2]) / weight_new;
+
+            // printf("sdf\t%f\tcolor\t%d\t%d\t%d\tweight%f\n", TSDF[volume_idx],TSDF_color[volume_idx * 3],TSDF_color[volume_idx * 3 + 1],TSDF_color[volume_idx * 3 + 2],weight[volume_idx]);
+
+        }
+    }
+
+    __device__ int d_floor(float f){
+        if(f >= 0.0)
+            return (int)f;
+        else
+            return (int)(f - 0.5);
+    }
+
+    __global__ 
+    void marchingCubeHashKernel(vhashing::HashTableBase<int3, VoxelBlock, BlockHasher, BlockEqual> dev_blockmap_,
+                unsigned int* d_valid_tri, unsigned int *d_heapBlockCounter, Triangle *tri, MarchingCubeParam *param){
+
+        unsigned int idheap = blockIdx.x;
+
+        // if(idheap != 100 || threadIdx.x != 7)
+        //     return;
+        // printf("heap\t%d\tvoxel\t%d\n",idheap, threadIdx.x);
+        if(idheap < *d_heapBlockCounter){
+            int3 idBlock = dev_blockmap_.key_heap[idheap];
+            VoxelBlock& vb = dev_blockmap_[idBlock];
+            Voxel& voxel = vb.voxels[threadIdx.x];
+
+            int VOXEL_PER_BLOCK2 = VOXEL_PER_BLOCK * VOXEL_PER_BLOCK;
+            int z = threadIdx.x % VOXEL_PER_BLOCK + idBlock.z * VOXEL_PER_BLOCK;
+            int y = ((threadIdx.x - z) % VOXEL_PER_BLOCK2) / VOXEL_PER_BLOCK + idBlock.y * VOXEL_PER_BLOCK;
+            int x = threadIdx.x / VOXEL_PER_BLOCK2 + idBlock.x * VOXEL_PER_BLOCK;
+
+            GRIDCELL grid;
+            for (int k = 0; k < 8; ++k) {
+
+                int cxi = x + param->idxMap[k][0];
+                int cyi = y + param->idxMap[k][1];
+                int czi = z + param->idxMap[k][2];
+
+                int3 id_nb_block = voxel2block(make_int3(cxi,cyi,czi));
+
+                // printf("current block\t%d\t%d\t%d\tvoxel\t%d\t%d\t%d\tnbvoxel\t%d\t%d\t%d\tblock\t%d\t%d\t%d\n", idBlock.x, idBlock.y, idBlock.z, x, y, z, cxi, cyi, czi, id_nb_block.x, id_nb_block.y, id_nb_block.z);
+                if(cxi == x)
+                    assert(idBlock.x == id_nb_block.x);
+                if(cyi == y)
+                    assert(idBlock.y == id_nb_block.y);                
+                if(czi == z)
+                    assert(idBlock.z == id_nb_block.z);
+
+                if(dev_blockmap_.find(id_nb_block) != dev_blockmap_.end()){
+                    grid.p[k] = Vertex(cxi, cyi, czi);
+
+                    int linear_id = voxelLinearInBlock(make_int3(cxi, cyi,czi), id_nb_block);
+
+                    VoxelBlock& nb_block = dev_blockmap_[id_nb_block];
+                    Voxel& nb_voxel = nb_block.voxels[linear_id];
+
+                    grid.p[k].r = nb_voxel.sdf_color[0];
+                    grid.p[k].g = nb_voxel.sdf_color[1];
+                    grid.p[k].b = nb_voxel.sdf_color[2];
+                    grid.val[k] = nb_voxel.sdf;
+
+                    // printf("%d\tnbvoxel\t%d\t%d\t%d\tsdf=%f\n", linear_id, cxi, cyi, czi,voxel.sdf);
+                }else{
+                    // printf("no neighbor\n");
+                        // printf("%d\tnbvoxel\t%d\t%d\t%d\tsdf=%f\n", linear_id, cxi, cyi, czi,voxel.sdf);
+                    
+                    // return;
+                }
+
+                // if(pt_grid_x == 20 && pt_grid_y == 8 && pt_grid_z == 0){
+                //     printf("80 34 3  tsdf %f \n", grid.val[k]);
+                // }
+            }
+
+            int cubeIndex = 0;
+            if (grid.val[0] < 0) cubeIndex |= 1;
+            if (grid.val[1] < 0) cubeIndex |= 2;
+            if (grid.val[2] < 0) cubeIndex |= 4;
+            if (grid.val[3] < 0) cubeIndex |= 8;
+            if (grid.val[4] < 0) cubeIndex |= 16;
+            if (grid.val[5] < 0) cubeIndex |= 32;
+            if (grid.val[6] < 0) cubeIndex |= 64;
+            if (grid.val[7] < 0) cubeIndex |= 128;
+
+            Vertex vertlist[12];
+            if (param->edgeTable[cubeIndex] == 0)
+                return;
+
+
+            if(x % 5 == 0 && y % 7 == 0 && z % 13 == 0)
+                printf("\t%d\t%d\t%d\n", x, y, z);
+
+            // printf("valid sdf\n");
+
+            /* Find the vertices where the surface intersects the cube */
+            if (param->edgeTable[cubeIndex] & 1)
+                vertlist[0] =
+                        VertexInterp(0, grid.p[0], grid.p[1], grid.val[0], grid.val[1]);
+            if (param->edgeTable[cubeIndex] & 2)
+                vertlist[1] =
+                        VertexInterp(0, grid.p[1], grid.p[2], grid.val[1], grid.val[2]);
+            if (param->edgeTable[cubeIndex] & 4)
+                vertlist[2] =
+                        VertexInterp(0, grid.p[2], grid.p[3], grid.val[2], grid.val[3]);
+            if (param->edgeTable[cubeIndex] & 8)
+                vertlist[3] =
+                        VertexInterp(0, grid.p[3], grid.p[0], grid.val[3], grid.val[0]);
+            if (param->edgeTable[cubeIndex] & 16)
+                vertlist[4] =
+                        VertexInterp(0, grid.p[4], grid.p[5], grid.val[4], grid.val[5]);
+            if (param->edgeTable[cubeIndex] & 32)
+                vertlist[5] =
+                        VertexInterp(0, grid.p[5], grid.p[6], grid.val[5], grid.val[6]);
+            if (param->edgeTable[cubeIndex] & 64)
+                vertlist[6] =
+                        VertexInterp(0, grid.p[6], grid.p[7], grid.val[6], grid.val[7]);
+            if (param->edgeTable[cubeIndex] & 128)
+                vertlist[7] =
+                        VertexInterp(0, grid.p[7], grid.p[4], grid.val[7], grid.val[4]);
+            if (param->edgeTable[cubeIndex] & 256)
+                vertlist[8] =
+                        VertexInterp(0, grid.p[0], grid.p[4], grid.val[0], grid.val[4]);
+            if (param->edgeTable[cubeIndex] & 512)
+                vertlist[9] =
+                        VertexInterp(0, grid.p[1], grid.p[5], grid.val[1], grid.val[5]);
+            if (param->edgeTable[cubeIndex] & 1024)
+                vertlist[10] =
+                        VertexInterp(0, grid.p[2], grid.p[6], grid.val[2], grid.val[6]);
+            if (param->edgeTable[cubeIndex] & 2048)
+                vertlist[11] =
+                        VertexInterp(0, grid.p[3], grid.p[7], grid.val[3], grid.val[7]);
+
+
+            int index = idheap * (VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK) + threadIdx.x;
+
+            int count = 0;
+            for (int ti = 0; param->triTable[cubeIndex][ti] != -1; ti += 3) {
+                int addr = atomicAdd(&d_valid_tri[0], 1);
+                // tri[addr].p[0] = vertlist[param->triTable[cubeIndex][ti]];
+                // tri[addr].p[1] = vertlist[param->triTable[cubeIndex][ti + 1]];
+                // tri[addr].p[2] = vertlist[param->triTable[cubeIndex][ti + 2]];
+                // tri[addr].valid = true;
+                tri[index * 5 + count].p[0] = vertlist[param->triTable[cubeIndex][ti]];
+                tri[index * 5 + count].p[1] = vertlist[param->triTable[cubeIndex][ti + 1]];
+                tri[index * 5 + count].p[2] = vertlist[param->triTable[cubeIndex][ti + 2]];
+                tri[index * 5 + count].valid = true;
+                count++;
+            }
+
+            // printf("count tri %d\n", index * 5 + count);
+            assert(count != 0);
         }
     }
 
@@ -393,6 +799,9 @@ namespace ark {
 
         for (int pt_grid_x = 0; pt_grid_x < param->vox_dim.x; ++pt_grid_x) {
             int index = global_index + pt_grid_x;
+
+                // if(pt_grid_x != 112 || pt_grid_y != 33 || pt_grid_z != 1)
+                //     return;
 
             GRIDCELL grid;
             for (int k = 0; k < 8; ++k) {
@@ -409,6 +818,9 @@ namespace ark {
                 grid.val[k] = TSDF[czi * param->vox_dim.y * param->vox_dim.z +
                                    cyi * param->vox_dim.z +
                                    cxi];
+
+                // printf("111 33 1  tsdf %f \n", grid.val[k]);
+
             }
 
             int cubeIndex = 0;
@@ -478,11 +890,7 @@ namespace ark {
     __host__
     void GpuTsdfGenerator::clearheap(){
         unsigned int src = 0;
-        unsigned int *d_heap;
         // cudaSafeCall(cudaFree(d_heapBlockCounter));
-        cudaSafeCall(cudaMalloc(&d_heap, sizeof(unsigned int)));
-        cudaSafeCall(cudaMemcpy(d_heap, &src, sizeof(unsigned int), cudaMemcpyHostToDevice));
-        
         cudaSafeCall(cudaMemcpy(d_heapBlockCounter, &src, sizeof(unsigned int), cudaMemcpyHostToDevice));
         std::cout<<" d_heapBlockCounter clear "<<std::endl;
     }
@@ -526,9 +934,6 @@ namespace ark {
         std::cout<<" d_outBlockCounter init "<<std::endl;
         d_heapBlockCounter = NULL;
         cudaSafeCall(cudaMalloc((void**)&d_heapBlockCounter, sizeof(unsigned int)));
-        clearheap();
-
-        printf("Host: HashAssign\n");
 
         // vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace>
         //     blocks(10000, 2, 19997, int3{999999, 999999, 999999});
@@ -733,61 +1138,96 @@ namespace ark {
         cudaMemcpy(dev_c2w_, c2w, 4 * 4 * sizeof(float), cudaMemcpyHostToDevice);
         cudaMemcpy(dev_depth_, depth, im_height_ * im_width_ * sizeof(float), cudaMemcpyHostToDevice);
         cudaMemcpy(dev_rgb_, rgb, 3 * im_height_ * im_width_ * sizeof(unsigned char), cudaMemcpyHostToDevice);
-        clearheap();
         checkCUDA(__LINE__, cudaGetLastError());
 
         memcpy(c2w_, c2w, 4 * 4 * sizeof(float));
 
-        std::cout<< "in streamInCPU2GPU ===  clear " <<std::endl;
+        std::cout<< "before streamInCPU2GPU ===  clear " <<std::endl;
         clearheap();
 
         streamInCPU2GPU(dev_K_, dev_c2w_, dev_depth_);
         checkCUDA(__LINE__, cudaGetLastError());
 
-        std::cout<< "out streamInCPU2GPU ===  clear " <<std::endl;
-        clearheap();
-
         HashAssign(dev_depth_, im_height_, im_width_, dev_param_, dev_K_, dev_c2w_);
         // HashAlloc();
         checkCUDA(__LINE__, cudaGetLastError());
-        {
-            // std::unique_lock<std::mutex> lock(tsdf_mutex_);
-            const unsigned int threadsPerBlock = VOXEL_PER_BLOCK*VOXEL_PER_BLOCK*VOXEL_PER_BLOCK;
-            unsigned int h_heapBlockCounter;
-            cudaSafeCall(cudaMemcpy(&h_heapBlockCounter,d_heapBlockCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost));
-            std::cout<<"h_heapBlockCounter == "<<h_heapBlockCounter<<std::endl;
 
+        Triangle *dev_hash_tri_ = nullptr;
+        unsigned int *d_valid_tri;
+        cudaSafeCall(cudaMalloc(&d_valid_tri, sizeof(unsigned int)));
+        int tri_0;
+        cudaSafeCall(cudaMemcpy(d_valid_tri, &tri_0, sizeof(unsigned int), cudaMemcpyHostToDevice));
+
+        unsigned int h_heapBlockCounter;
+        cudaSafeCall(cudaMemcpy(&h_heapBlockCounter,d_heapBlockCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost));
+        std::cout<<"h_heapBlockCounter == "<<h_heapBlockCounter<<std::endl;
+
+        unsigned int total_vox = h_heapBlockCounter * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK;
+
+        {
+            std::unique_lock<std::mutex> lock(tsdf_mutex_);
             const dim3 gridSize(h_heapBlockCounter, 1);
-            const dim3 blockSize(VOXEL_PER_BLOCK, 1);
+            const dim3 blockSize(VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK, 1);
             checkCUDA(__LINE__, cudaGetLastError());
 
             std::cout<<"before IntegrateHashKernel == "<<std::endl;
 
             IntegrateHashKernel <<< gridSize, blockSize >>> (dev_K_, dev_c2w_, dev_depth_, dev_rgb_, 
                 im_height_, im_width_, dev_param_, *dev_blockmap_, d_inBlockPosHeap, d_heapBlockCounter);
+
+            checkCUDA(__LINE__, cudaGetLastError());
+            std::cout<<"after IntegrateHashKernel == "<<std::endl;
+
+
+            cudaMalloc(&dev_hash_tri_, sizeof(Triangle) * total_vox * 5);
+
+
+            cudaMemset(dev_hash_tri_, 0, sizeof(Triangle) * total_vox * 5);
+            marchingCubeHashKernel << < gridSize, blockSize >> >
+                                                       (*dev_blockmap_, d_valid_tri, d_heapBlockCounter, dev_hash_tri_, dev_param_);
+            checkCUDA(__LINE__, cudaGetLastError());
+
+            unsigned int h_valid_tri = 0;
+            cudaSafeCall(cudaMemcpy(&h_valid_tri, d_valid_tri, sizeof(unsigned int), cudaMemcpyDeviceToHost));
+
+            std::cout<<"after marchingCubeHashKernel == "<<h_valid_tri<<std::endl;
+
         }
-        checkCUDA(__LINE__, cudaGetLastError());
+        
+        {
+            std::unique_lock<std::mutex> lock(tri_mutex_);
+            Triangle* hash_tri_ = (Triangle *) malloc(sizeof(Triangle) * total_vox * 5);
+            cudaMemcpy(tri_, dev_hash_tri_, sizeof(Triangle) * total_vox * 5, cudaMemcpyDeviceToHost);
+            checkCUDA(__LINE__, cudaGetLastError());
+            int count = 0;
+            for (int i = 0; i < total_vox * 5; ++i) {
+                if (!tri_[i].valid)
+                    continue;
+                count ++;
+            }
+            printf("valid tri == %d \n", count);
+        }
 
         // getLocalGrid();
 
         {
-            std::unique_lock<std::mutex> lock(tsdf_mutex_);
-            Integrate << < param_->vox_dim.z, param_->vox_dim.y >> >
-                                              (dev_K_, dev_c2w_, dev_depth_, dev_rgb_, im_height_, im_width_, dev_TSDF_, dev_TSDF_color_, dev_weight_, dev_param_);
+            // std::unique_lock<std::mutex> lock(tsdf_mutex_);
+            // Integrate << < param_->vox_dim.z, param_->vox_dim.y >> >
+            //                                   (dev_K_, dev_c2w_, dev_depth_, dev_rgb_, im_height_, im_width_, dev_TSDF_, dev_TSDF_color_, dev_weight_, dev_param_);
 
-            checkCUDA(__LINE__, cudaGetLastError());
+            // checkCUDA(__LINE__, cudaGetLastError());
 
-            cudaMemset(dev_tri_, 0, sizeof(Triangle) * param_->total_vox * 5);
-            marchingCubeKernel << < param_->vox_dim.z, param_->vox_dim.y >> >
-                                                       (dev_TSDF_, dev_TSDF_color_, dev_tri_, dev_param_);
-            checkCUDA(__LINE__, cudaGetLastError());
+            // cudaMemset(dev_tri_, 0, sizeof(Triangle) * param_->total_vox * 5);
+            // marchingCubeKernel << < param_->vox_dim.z, param_->vox_dim.y >> >
+            //                                            (dev_TSDF_, dev_TSDF_color_, dev_tri_, dev_param_);
+            // checkCUDA(__LINE__, cudaGetLastError());
         }
 
 
         {
-            std::unique_lock<std::mutex> lock(tri_mutex_);
-            cudaMemcpy(tri_, dev_tri_, sizeof(Triangle) * param_->total_vox * 5, cudaMemcpyDeviceToHost);
-            checkCUDA(__LINE__, cudaGetLastError());
+            // std::unique_lock<std::mutex> lock(tri_mutex_);
+            // cudaMemcpy(tri_, dev_tri_, sizeof(Triangle) * param_->total_vox * 5, cudaMemcpyDeviceToHost);
+            // checkCUDA(__LINE__, cudaGetLastError());
         }
     }
 
@@ -903,6 +1343,7 @@ namespace ark {
                 glVertex3f(10 * tri_[i].p[j].x * param_->vox_size - 15,
                            -10 * tri_[i].p[j].y * param_->vox_size + 15,
                            -10 * tri_[i].p[j].z * param_->vox_size + 10);
+                // printf("\t%d\t%d\t%\n", tri_[i].p[j].x, tri_[i].p[j].y, tri_[i].p[j].z);
             }
             glEnd();
         }
@@ -1134,33 +1575,6 @@ namespace ark {
     }
 
 
-    //camera function
-    __device__
-    void frame2cam(float pt_pix_x, float pt_pix_y, float pt_cam_z, float* pt_cam, float* K_){
-        //convert bottom left of frame to current frame camera coordinates (camera)
-        pt_cam[2] = pt_cam_z;
-        pt_cam[0] = (pt_pix_x - K_[0 * 3 + 2]) * pt_cam_z / K_[0 * 3 + 0];
-        pt_cam[1] = (pt_pix_y - K_[1 * 3 + 2]) * pt_cam_z / K_[1 * 3 + 1];
-
-    }
-
-    __device__
-    void cam2base(float *pt_cam, float* pt_base, float * c2w_){
-        // Convert from current frame camera coordinates to base frame camera coordinates (wolrd)
-        pt_base[0] = pt_cam[0] * c2w_[0 * 4 + 0] + pt_cam[1] * c2w_[0 * 4 + 1] + pt_cam[2] * c2w_[0 * 4 + 2] + c2w_[0 * 4 + 3];
-        pt_base[1] = pt_cam[0] * c2w_[1 * 4 + 0] + pt_cam[1] * c2w_[1 * 4 + 1] + pt_cam[2] * c2w_[1 * 4 + 2] + c2w_[1 * 4 + 3];
-        pt_base[2] = pt_cam[0] * c2w_[2 * 4 + 0] + pt_cam[1] * c2w_[2 * 4 + 1] + pt_cam[2] * c2w_[2 * 4 + 2] + c2w_[2 * 4 + 3];
-    }
-
-    __device__
-    float3 frame2base(float pt_pix_x, float pt_pix_y, float pt_cam_z, float* K_, float * c2w_){
-        float pt_cam[3];
-        frame2cam(pt_pix_x, pt_pix_y, pt_cam_z, pt_cam, K_);
-        float pt_base[3];
-        cam2base(pt_cam, pt_base, c2w_);
-        return make_float3(pt_base[0], pt_base[1], pt_base[2]);
-    }
-
     //hashing function
 
     // __global__
@@ -1233,7 +1647,7 @@ namespace ark {
         return pImage;
     }
 
-    __device__ float3 wolrd2cam(float* c2w_, float3 pos){
+    __device__ float3 wolrd2cam(float* c2w_, float3 pos, MarchingCubeParam* param){
                 // Convert from base frame camera coordinates to current frame camera coordinates
         float tmp_pt[3] = {0};
         tmp_pt[0] = pos.x - c2w_[0 * 4 + 3];
@@ -1250,22 +1664,61 @@ namespace ark {
     }
 
     __device__ bool isBlockInCameraFrustum(float3 blocks_pos, float* c2w, MarchingCubeParam* param){
-        float3 pCamera = wolrd2cam(c2w, blocks_pos);
+        // printf("device print\n");
+        float3 pCamera = wolrd2cam(c2w, blocks_pos,param);
         float3 pProj = cameraToKinectProj(pCamera, param);
         //pProj *= 1.5f;    //TODO THIS IS A HACK FIX IT :)
         pProj *= 0.95;
         return !(pProj.x < -1.0f || pProj.x > 1.0f || pProj.y < -1.0f || pProj.y > 1.0f || pProj.z < 0.0f || pProj.z > 1.0f); 
     }
 
+    // __global__ void hashCopyKernel(vhashing::HashTableBase<int3, VoxelBlock, BlockHasher, BlockEqual> dev_blockmap_chunks, 
+    //     vhashing::HashTableBase<int3, VoxelBlock, BlockHasher, BlockEqual> dev_blockmap_){
+    //     int base = blockDim.x * blockIdx.x  +  threadIdx.x;
+    //     vhashing::HashEntryBase<int3> &entr = dev_blockmap_chunks.hash_table[base];
+    //     VoxelBlock vb;
+    //     dev_blockmap_[entr.key] = vb;//entr.value;
+    // }
+
+    __device__ volatile int sem = 0;
+
+    __device__ void acquire_semaphore(volatile int *lock){
+      while (atomicCAS((int *)lock, 0, 1) != 0)
+        printf("wait\n");
+    }
+
+    __device__ void release_semaphore(volatile int *lock){
+      // *lock = 0;
+      // __threadfence();
+        atomicExch((int*)lock, 0);
+    }
+
+
     __global__ void HashAssignKernel(float *depth, const unsigned int height, const unsigned int width, 
         MarchingCubeParam *param, float* K, float* c2w, 
-        vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace> dev_blockmap_chunks, 
-        vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace> dev_blockmap_,
+        vhashing::HashTableBase<int3, VoxelBlock, BlockHasher, BlockEqual> dev_blockmap_chunks, 
+        vhashing::HashTableBase<int3, VoxelBlock, BlockHasher, BlockEqual> dev_blockmap_,
         unsigned int *d_heapBlockCounter, VoxelBlockPos* d_inBlockPosHeap){
 
         const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
         const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+
+        // if(x != DEBUG_WIDTH || y != DEBUG_HEIGHT)
+        //     return;
+
+        // if(x %10 !=0 || y %10 != 0)
+        //     return;
+    
+        // if(dev_blockmap_chunks.find(make_int3(16,16,0)) != dev_blockmap_chunks.end())
+        //     printf("insert successfully  16 16 0\n");
+        // else
+        //     printf("not find 16 16 0\n");
+        
         if(x < width && y < height){
+            // if(y == 0)
+            //     printf("%d\n", x);
+
             float d = depth[x * width + y];
 
             if(d == 0.0f || d == MINF)
@@ -1281,12 +1734,21 @@ namespace ark {
                 return;
 
             float3 raymin, raymax;
-            raymin = frame2base(x,y,minDepth, K, c2w);
-            raymax = frame2base(x,y,maxDepth, K, c2w);
+            raymin = frame2base(x,y,param->min_depth, K, c2w, param);
+            raymax = frame2base(x,y,param->max_depth , K, c2w, param);
+            float3 camcenter = frame2base(x,y,0, K, c2w, param);
+            // printf("raymin\t%f\t%f\t%f\traymax \t%f\t%f\t%f\torigin\t%f\t%f\t%f\n", 
+            //         raymin.x, raymin.y, raymin.z, raymax.x, raymax.y, raymax.z, camcenter.x, camcenter.y, camcenter.z);
 
             float3 rayDir = normalize(raymax - raymin);
             int3 idCurrentBlock = wolrd2block(raymin, param->block_size);
             int3 idEnd = wolrd2block(raymax, param->block_size);
+
+            float3 cam_pos = make_float3(c2w[0 * 4 + 3],c2w[1 * 4 + 3],c2w[2 * 4 + 3]);
+
+            // printf("kernel at(%d,%d), camera(%f,%f,%f), ray(%f,%f,%f) block(%d,%d,%d) to (%d,%d,%d)\n", x, y, cam_pos.x, cam_pos.y, cam_pos.z, rayDir.x, rayDir.y, rayDir.z,
+            // idCurrentBlock.x, idCurrentBlock.y, idCurrentBlock.z,
+            // idEnd.x, idEnd.y, idEnd.z);
 
             float3 step = make_float3(sign(rayDir));
             float3 boundarypos = block2world(idCurrentBlock + make_int3(clamp(step, 0.0, 1.0f)), param->block_size) - 0.5f * param->vox_size;
@@ -1301,28 +1763,67 @@ namespace ark {
             unsigned int iter = 0;
             unsigned int maxLoopIterCount = 1024;
 
-            float3 cam_pos = make_float3(c2w[0 * 4 + 3],c2w[1 * 4 + 3],c2w[2 * 4 + 3]);
-
             while(iter < maxLoopIterCount){
+                // if(idCurrentBlock.x == 20 && idCurrentBlock.y == 8 && idCurrentBlock.z == 0)
+                //     printf("arrive 20 8 0\n");
+                // if(idCurrentBlock.x == 20 && idCurrentBlock.y == 10 && idCurrentBlock.z == 2)
+                //     printf("arrive 20 10 2\n");                
                 float3 blocks_pos = block2world(idCurrentBlock, param->block_size);
-                printf("blocks_pos %f %f %f \n", blocks_pos.x, blocks_pos.y, blocks_pos.z);
+                if(dev_blockmap_chunks.find(idCurrentBlock) != dev_blockmap_chunks.end()){
+                    if(isBlockInCameraFrustum(blocks_pos, c2w, param)){
+                        // printf("idCurrentBlock (%d,%d,%d) at (%f,%f,%f) in camera\n",idCurrentBlock.x, idCurrentBlock.y, idCurrentBlock.z, blocks_pos.x, blocks_pos.y, blocks_pos.z);
+                        // printf("\tin camera");
+                        // __syncthreads();
+                        // // if (threadIdx.x % 2 == 0)
+                        //   acquire_semaphore(&sem);
+                        // __syncthreads();
+                        // int pre_counter = atomicExch(&d_heapBlockCounter[0], LOCK_HASH);
+                        // if(dev_blockmap_.find(idCurrentBlock) == dev_blockmap_.end()){
+                            dev_blockmap_[idCurrentBlock] = dev_blockmap_chunks[idCurrentBlock];
+                            // uint addr = atomicAdd(&d_heapBlockCounter[0], 1);
+                            // d_inBlockPosHeap[addr].pos = idCurrentBlock;
+                            // printf("%d %d insert (%d,%d,%d)\n", x, y, idCurrentBlock.x, idCurrentBlock.y, idCurrentBlock.z);
+                        // }
+                        // __syncthreads();
+                        // // if (threadIdx.x % 2 == 0)
+                        //   release_semaphore(&sem);
+                        // __syncthreads();
+                    }else{
+                        // printf("idCurrentBlock (%d,%d,%d) at (%f,%f,%f) ++ chunk\n",idCurrentBlock.x, idCurrentBlock.y, idCurrentBlock.z, blocks_pos.x, blocks_pos.y, blocks_pos.z);
 
-                if(isBlockInCameraFrustum(blocks_pos, c2w, param)){
-                    printf("in camera ++ %d\n", *d_heapBlockCounter);   ///////bug here
-                    
-                    if(dev_blockmap_chunks.find(idCurrentBlock) != dev_blockmap_chunks.end()){
-                        uint addr = atomicAdd(&d_heapBlockCounter[0], 1);
-                        dev_blockmap_[idCurrentBlock] = dev_blockmap_chunks[idCurrentBlock];
-                        d_inBlockPosHeap[addr].pos = idCurrentBlock;
                     }
-                    // else{
-                    //     VoxelBlock vb;
-                    //     dev_blockmap_[idCurrentBlock] = vb;
-                    //     d_inBlockPosHeap[addr].pos = idCurrentBlock;
-                    // }
                 }else{
-                    printf("not in camera\n");
+                    // printf("idCurrentBlock (%d,%d,%d) at (%f,%f,%f) __ chunk\n",idCurrentBlock.x, idCurrentBlock.y, idCurrentBlock.z, blocks_pos.x, blocks_pos.y, blocks_pos.z);
+
                 }
+
+                // // printf("\n");
+                // else{
+                //     if(isBlockInCameraFrustum(blocks_pos, c2w, param))
+                //         printf("not in scope  %d %d %d \n");
+                //     else
+                //         printf("not in camera frustum\n");
+                // }
+        
+                // if(isBlockInCameraFrustum(blocks_pos, c2w, param)){
+                //     // printf("blocks_pos %f %f %f cam_pos %f %f %f in camera ++ %d\n",  blocks_pos.x, blocks_pos.y, blocks_pos.z,
+                //     // cam_pos.x, cam_pos.y, cam_pos.z, *d_heapBlockCounter);   ///////bug here
+                    
+                //     if(dev_blockmap_chunks.find(idCurrentBlock) != dev_blockmap_chunks.end()){
+                //         // printf("find block in chunk\n");
+                //         uint addr = atomicAdd(&d_heapBlockCounter[0], 1);
+                //         dev_blockmap_[idCurrentBlock] = dev_blockmap_chunks[idCurrentBlock];
+                //         d_inBlockPosHeap[addr].pos = idCurrentBlock;
+                //     }
+                //     // else{
+                //     //     VoxelBlock vb;
+                //     //     dev_blockmap_[idCurrentBlock] = vb;
+                //     //     d_inBlockPosHeap[addr].pos = idCurrentBlock;
+                //     // }
+                // }else{
+                //     // printf("blocks_pos %f %f %f cam_pos %f %f %f not in camera\n", blocks_pos.x, blocks_pos.y, blocks_pos.z,
+                //     // cam_pos.x, cam_pos.y, cam_pos.z);
+                // }
 
                 if(tmax.x < tmax.y && tmax.x < tmax.z){
                     idCurrentBlock.x += step.x;
@@ -1351,8 +1852,22 @@ namespace ark {
         // dev_block_idx.clear();
     }
 
+    __global__ void getHeapCounterKernel(int* count, 
+        vhashing::HashTableBase<int3, VoxelBlock, BlockHasher, BlockEqual> dev_blockmap_){
+        if(blockIdx.x == 0 && threadIdx.x == 0){
+            *count = *(dev_blockmap_.heap_counter);
+            printf("count kernel 00 == %d \n", *count);
+        }
+            
+    }
+
     __host__ void GpuTsdfGenerator::HashAssign(float *depth, const unsigned int height, const unsigned int width, 
         MarchingCubeParam *param, float* K, float* c2w){
+        
+        
+        vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
+        bmhi_chunk(*dev_blockmap_chunks);
+        
 
         {
             const dim3 grid_size((im_width_ + T_PER_BLOCK - 1) / T_PER_BLOCK, (im_height_ + T_PER_BLOCK - 1) / T_PER_BLOCK, 1);
@@ -1361,20 +1876,101 @@ namespace ark {
 
             printf("Host: HashAssign\n");
 
-            clearheap();
-
-            unsigned int dst;
+            unsigned int dst = 0;
             cudaSafeCall(cudaMemcpy(&dst, d_heapBlockCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost));
             printf("Host: HashAssignKernel before d_heapBlockCounter %d\n", dst);
 
             HashAssignKernel <<< grid_size, block_size >>> (dev_depth_, im_height_, im_width_, dev_param_, dev_K_, dev_c2w_, *dev_blockmap_chunks, *dev_blockmap_, d_heapBlockCounter, d_inBlockPosHeap);
-            cudaSafeCall(cudaMemcpy(&dst, d_heapBlockCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost));
-            printf("Host: HashAssign d_heapBlockCounter %d\n", dst);
             
 
+            // hashCopyKernel <<< 100001, 4 >>> (*dev_blockmap_chunks, *dev_blockmap_);
+
+            cudaSafeCall(cudaMemcpy(&dst, d_heapBlockCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost));
+            printf("Host: HashAssign d_heapBlockCounter %d\n", dst);
         }
 
         cudaSafeCall(cudaDeviceSynchronize()); //debug
+                    // stream in
+
+       // stream in
+        vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
+        bmhi(*dev_blockmap_);
+        // int count = 0;
+        // for(int i = 0; i < *(bmhi.heap_counter); i ++){
+        //     for(int j = 0; j < 4; j ++){
+        //         int offset = i * 4 + j;
+        //         vhashing::HashEntryBase<int3> &entr = bmhi.hash_table[offset];
+        //         int3 ii = entr.key;
+        //         if(ii.x == 999999 && ii.y == 999999 && ii.z == 999999 )
+        //             continue;
+        //         else{
+        //             count ++;
+        //         }
+        //     }
+        // }
+        printf("* get in camera counter %d \n", *(bmhi.heap_counter));
+
+        int recount = 0;
+        // stream in
+        vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
+        bmhhh(100001, 4, 400000, int3{999999, 999999, 999999});
+
+        // check
+        for (int i=0; i<*(bmhi.heap_counter); i++) {
+            int3 key = bmhi.key_heap[i];
+            // printf("key\t%d\t%d\t%d\n", key.x, key.y, key.z);
+            if(bmhhh.find(key) == bmhhh.end()){
+                VoxelBlock vb;
+                bmhhh[key] = vb;
+                recount ++;
+            }
+        }
+
+        // printf("count out ==== %d\n", recount);
+
+        int *HeapCounter;
+        cudaSafeCall(cudaMalloc((void**)&HeapCounter, sizeof(int)));
+        
+        {
+            getHeapCounterKernel <<< 1, 1 >>> (HeapCounter, *dev_blockmap_);
+
+        }
+        // cudaSafeCall(cudaDeviceSynchronize()); //debug
+        int dst_insert = 0;
+        cudaMemcpy(&dst_insert, HeapCounter, sizeof(int), cudaMemcpyDeviceToHost);
+
+        // unsigned int dst_u = dst_insert;
+        cudaMemcpy(d_heapBlockCounter, &dst_insert, sizeof(unsigned int), cudaMemcpyHostToDevice);
+
+        // int src = 0;
+        // cudaMemcpy(HeapCounter, &src, sizeof(int), cudaMemcpyHostToDevice);
+
+        printf("src === get  %d\n", dst_insert);
+        // vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
+        // bmhi(*dev_blockmap_);
+        // int count = 0;
+        // int error = 0;
+        // for(int i = 0; i < 100001; i ++){
+        //     for(int j = 0; j < 4; j ++){
+        //         int offset = i * 4 + j;
+        //         vhashing::HashEntryBase<int3> &entr = bmhi.hash_table[offset];
+        //         int3 ii = entr.key;
+        //         if(ii.x == 999999 && ii.y == 999999 && ii.z == 999999 )
+        //             continue;
+        //         else{
+
+        //             if(bmhi_chunk.find(entr.key) == bmhi_chunk.end())
+        //                 error ++;
+        //             count ++;
+        //         }
+        //     }
+        // }
+
+        // {
+        //                             // d_inBlockPosHeap[addr].pos = idCurrentBlock;
+        //                 // uint addr = atomicAdd(&d_heapBlockCounter[0], 1);
+        // }
+        // printf("error %d count %d in map\n",error,count);
     }
 }
 

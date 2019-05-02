@@ -41,7 +41,7 @@
 #define BLOCK_PER_CHUNK 8
 #define MAX_CPU2GPU_BLOCKS 100000
 #define MAX_CHUNK_NUM 128
-#define CHUNK_RADIUS 2.0
+#define CHUNK_RADIUS 4.0
 
 __host__
 static void FatalError(const int lineNumber = 0) {
@@ -102,7 +102,7 @@ namespace ark {
     };
 
     struct VoxelBlock {
-        Voxel voxels[4*4*4];
+        Voxel voxels[VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK];
     };
 
     struct VoxelBlockPos{
@@ -150,12 +150,14 @@ namespace ark {
             if(blocks == NULL){
                 blocks = new VoxelBlock[block_total];
             }
+            int3 block_start = pos * make_int3(BLOCK_PER_CHUNK);
+
             if(blocksPos == NULL){
                 blocksPos = new VoxelBlockPos[block_total];
                 for(int x = 0; x < BLOCK_PER_CHUNK; x ++)
                     for(int y = 0; y < BLOCK_PER_CHUNK; y ++)
                         for(int z = 0; z < BLOCK_PER_CHUNK; z++){
-                            blocksPos[(x * BLOCK_PER_CHUNK + y) * BLOCK_PER_CHUNK + z].pos = pos + make_int3(x,y,z);
+                            blocksPos[(x * BLOCK_PER_CHUNK + y) * BLOCK_PER_CHUNK + z].pos = block_start + make_int3(x,y,z);
                         }
             }
         }
@@ -603,7 +605,7 @@ namespace ark {
         void HashReset();
 
         __host__
-        bool isChunkInCameraFrustum(int x, int y, int z);
+        bool isChunkInCameraFrustum(int x, int y, int z, float3 frustumCenter);
 
         __host__ bool isPosInCameraFrustum(float x, float y, float z);
 
@@ -618,6 +620,8 @@ namespace ark {
         __host__ float3 getCameraPos();
 
         __host__ void clearheap();
+
+        __host__ float3 getFrustumCenter();
     };
 
     // class TSDFHashMap
