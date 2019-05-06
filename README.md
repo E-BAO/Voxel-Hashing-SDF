@@ -1,7 +1,12 @@
 # Voxel Hashing SDF
 
 ## Dependencies
-CUDA 8.0
+CUDA
+PCL
+OpenCV
+
+## Platform
+OS: Ubuntu 16.04 LTS
 
 ## Build
 ```bash
