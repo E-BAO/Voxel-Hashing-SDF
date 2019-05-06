@@ -1,5 +1,8 @@
 # Voxel Hashing SDF
 
+## Dependencies
+CUDA 8.0
+
 ## Build
 ```bash
   mkdir build && cd build
