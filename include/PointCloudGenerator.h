@@ -47,6 +47,7 @@ namespace ark{
 
         void Reproject(const cv::Mat &imRGB,const cv::Mat &imD, const cv::Mat &Twc);
 
+        void PushFrame(const RGBDFrame &frame);
     private:
 
 

@@ -1,5 +1,5 @@
 #include "tsdf.cuh"
-
+#include <unordered_map>
 
 // using namespace CUDASTL;
 using std::vector;
@@ -10,6 +10,7 @@ using std::default_random_engine;
 #define DEBUG_X  113
 #define DEBUG_Y  26
 #define DEBUG_Z  3
+#define DDA_STEP 10
 // CUDA kernel function to integrate a TSDF voxel volume given depth images
 namespace ark {
     // static const int LOCK_HASH = -1;
@@ -17,6 +18,8 @@ namespace ark {
     //hashing device
     vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace>* dev_blockmap_chunks;
     vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace>* dev_blockmap_;
+
+    static  int countFrame = 0;
     
     __device__ float3 voxel2world(int3 voxel, float voxel_size){
         float3 p;
@@ -198,6 +201,7 @@ namespace ark {
         p.y = floor(pos.y/chunk_size);
         p.z = floor(pos.z/chunk_size);
 
+
         return p;
     }
 
@@ -206,8 +210,8 @@ namespace ark {
         // const uint total_vx_p_block = VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK;
         if(bucketId < h_inChunkCounter){
             int3 pos = d_inBlockPos[bucketId].pos;
-            // printf("hash insert:%d %d %d\n", pos.x, pos.y, pos.z);
-            dev_blockmap_chunks[pos] = d_inBlock[bucketId];
+            // if(dev_blockmap_chunks.find(pos) == dev_blockmap_chunks.end())
+                dev_blockmap_chunks[pos] = d_inBlock[bucketId];
         }
     }
 
@@ -231,12 +235,14 @@ namespace ark {
             }
     }
 
+
     __host__ int3 blockLinear2Int3(int idLinearBlock){
         int z = idLinearBlock % BLOCK_PER_CHUNK;
         int y = floor((idLinearBlock % (BLOCK_PER_CHUNK * BLOCK_PER_CHUNK))/BLOCK_PER_CHUNK);
         int x = floor(idLinearBlock / (BLOCK_PER_CHUNK * BLOCK_PER_CHUNK));
         return make_int3(x,y,z);
     }
+
 
     __host__ int3 chunk2block(int3 idChunk, int idLinearBlock){
         int3 id = blockLinear2Int3(idLinearBlock);
@@ -246,6 +252,21 @@ namespace ark {
         int z = idChunk.z * BLOCK_PER_CHUNK + id.z;
         return make_int3(x,y,z);
     }
+
+    __host__ __device__ int3 block2chunk(int3 idBlock){
+        return make_int3(floor((float)idBlock.x/(float)BLOCK_PER_CHUNK),
+            floor((float)idBlock.y/(float)BLOCK_PER_CHUNK),
+            floor((float)idBlock.z/(float)BLOCK_PER_CHUNK));
+    }
+
+
+    __host__ int blockPos2Linear(int3 blocksPos){
+        int3 chunkpos = block2chunk(blocksPos);
+        int3 insideId = blocksPos - chunkpos * make_int3(BLOCK_PER_CHUNK);
+        return (insideId.x * BLOCK_PER_CHUNK + insideId.y) * BLOCK_PER_CHUNK + insideId.z;
+    }
+
+
 
     __host__ float3 chunk2world(int3 idChunk, float chunk_size){
         return make_float3(((float)(idChunk.x) + 0.5)* chunk_size,
@@ -258,64 +279,72 @@ namespace ark {
         int block_total = BLOCK_PER_CHUNK * BLOCK_PER_CHUNK * BLOCK_PER_CHUNK;
         h_inChunkCounter = 0;
 
-        printf("HOST: streamInCPU2GPU\n");
+        // printf("HOST: streamInCPU2GPU\n");
 
         float3 cam_pos = getCameraPos();
-        printf("cam_pos = %f %f %f\n", cam_pos.x, cam_pos.y, cam_pos.z);
+        // printf("cam_pos = %f %f %f\n", cam_pos.x, cam_pos.y, cam_pos.z);
         int3 camera_ck = world2chunk(cam_pos);
-        printf("camera_chunk = %d %d %d \n", camera_ck.x, camera_ck.y, camera_ck.z);
+        // printf("camera_chunk = %d %d %d \n", camera_ck.x, camera_ck.y, camera_ck.z);
         
         float3 frustumCenter = getFrustumCenter();
-        printf("frustumCenter = %f %f %f\n", frustumCenter.x, frustumCenter.y, frustumCenter.z);
+        // printf("frustumCenter = %f %f %f\n", frustumCenter.x, frustumCenter.y, frustumCenter.z);
 
         int3 camera_chunk = world2chunk(frustumCenter);
 
         float3 chunk_center = chunk2world(camera_chunk, chunk_size);
-        printf("MAX_CHUNK_NUM = %d chunk start from %d of size %f\n", MAX_CHUNK_NUM, -MAX_CHUNK_NUM/2, chunk_size);
-        printf("frustum_chunk = %d %d %d  pos = %f %f %f block = %d %d %d \n", camera_chunk.x, camera_chunk.y, camera_chunk.z,
-            chunk_center.x, chunk_center.y, chunk_center.z,
-            camera_chunk.x * BLOCK_PER_CHUNK, camera_chunk.y * BLOCK_PER_CHUNK, camera_chunk.z * BLOCK_PER_CHUNK);
+        // printf("MAX_CHUNK_NUM = %d chunk start from %d of size %f\n", MAX_CHUNK_NUM, -MAX_CHUNK_NUM/2, chunk_size);
+        // // printf("frustum_chunk = %d %d %d  pos = %f %f %f block = %d %d %d \n", camera_chunk.x, camera_chunk.y, camera_chunk.z,
+        //     chunk_center.x, chunk_center.y, chunk_center.z,
+        //     camera_chunk.x * BLOCK_PER_CHUNK, camera_chunk.y * BLOCK_PER_CHUNK, camera_chunk.z * BLOCK_PER_CHUNK);
 
         int chunk_range_i = ceil(CHUNK_RADIUS/chunk_size); 
 
-        printf("chunk_range_i = %d\n", chunk_range_i);
+        // printf("chunk_range_i = %d\n", chunk_range_i);
 
         int3 chunk_start = make_int3(max(camera_chunk.x - chunk_range_i, - MAX_CHUNK_NUM / 2),
             max(camera_chunk.y - chunk_range_i, - MAX_CHUNK_NUM / 2),
             max(camera_chunk.z - chunk_range_i, - MAX_CHUNK_NUM / 2));
 
-        printf("chunk_start = %d %d %d\n", chunk_start.x, chunk_start.y, chunk_start.z);
+        // printf("chunk_start = %d %d %d\n", chunk_start.x, chunk_start.y, chunk_start.z);
 
         int3 chunk_end = make_int3(min(camera_chunk.x + chunk_range_i, MAX_CHUNK_NUM / 2 - 1),
             min(camera_chunk.y + chunk_range_i, MAX_CHUNK_NUM / 2 - 1),
             min(camera_chunk.z + chunk_range_i, MAX_CHUNK_NUM / 2 - 1));
 
-        printf("chunk_end = %d %d %d\n", chunk_end.x, chunk_end.y, chunk_end.z);
+        // printf("chunk_end = %d %d %d\n", chunk_end.x, chunk_end.y, chunk_end.z);
+
+        std::unique_lock<std::mutex> lock(chunk_mutex_);
 
         //x y z  real pos idx
         for(int x = chunk_start.x; x <= chunk_end.x; x ++){   //should reach end   ======
             for(int y = chunk_start.y; y <= chunk_end.y; y ++){
                 for(int z = chunk_start.z; z <= chunk_end.z; z++){
-                    if(isChunkInCameraFrustum(x,y,z, frustumCenter)){
-                        // printf("isChunkInCameraFrustum  %d %d %d\n", x, y, z);
-                        int idChunk = chunkGetLinearIdx(x,y,z);
-                        int3 stt = chunk2block(make_int3(x,y,z),0);
-                        int3 endd = chunk2block(make_int3(x,y,z),block_total - 1);
+                    int idChunk = chunkGetLinearIdx(x,y,z);
 
-                        if(h_chunks[idChunk].blocks == NULL){
+                    if(isChunkInCameraFrustum(x,y,z, frustumCenter)){
+
+                        // int3 stt = chunk2block(make_int3(x,y,z),0);
+                        // int3 endd = chunk2block(make_int3(x,y,z),block_total - 1);
+
+                        if(h_chunks[idChunk].blocks == nullptr){
                             h_chunks[idChunk].create(make_int3(x,y,z));
                         }
 
                         // if(x == 2 && y == 1 && z == 0){
-                            printf("idChunk\t%d,%d,%d\t%d\tof\t%d,%d,%d\tto\t%d,%d,%d\n",x, y, z,idChunk,stt.x,stt.y,stt.z, endd.x, endd.y, endd.z);
-                            if(stt.x <= 17 && endd.x >= 17 &&
-                                stt.y <= 16 && endd.y >= 16 &&
-                                stt.z <= 4 && endd.z >= 4)
-                                printf("successfully 17 16 4\n");
-                            if(stt.x <= 24 && endd.x >= 24 &&
-                                stt.y <= 9 && endd.y >= 9 &&
-                                stt.z <= -1 && endd.z >= -1)
-                                printf("successfully 24 9 -1\n");
+                            // printf("idChunk\t%d,%d,%d\t%d\tof\t%d,%d,%d\tto\t%d,%d,%d\n",x, y, z,idChunk,stt.x,stt.y,stt.z, endd.x, endd.y, endd.z);
+                            // if(stt.x <= 17 && endd.x >= 17 &&
+                            //     stt.y <= 16 && endd.y >= 16 &&
+                            //     stt.z <= 4 && endd.z >= 4)
+                            //     printf("successfully 17 16 4\n");
+                            // if(stt.x <= 24 && endd.x >= 24 &&
+                            //     stt.y <= 9 && endd.y >= 9 &&
+                            //     stt.z <= -1 && endd.z >= -1)
+                            //     printf("successfully 24 9 -1\n");
+
+                            // if(stt.x <= 25 && endd.x >= 25 &&
+                            //     stt.y <= 22 && endd.y >= 22 &&
+                            //     stt.z <= 9 && endd.z >= 9)
+                            //     printf("successfully 25 22 9\n");
 
                             // printf("instore %d %d %d == %d of blocks from %d %d %d to %d %d %d \n",x, y, z,
                             //     idChunk,
@@ -329,8 +358,10 @@ namespace ark {
                         // printf("cuda malloc total %d  max :% d\n", h_inChunkCounter, MAX_CPU2GPU_BLOCKS);
                         cudaSafeCall(cudaMemcpy(d_inBlock + h_inChunkCounter,h_chunks[idChunk].blocks, sizeof(VoxelBlock) * block_total, cudaMemcpyHostToDevice));
                         cudaSafeCall(cudaMemcpy(d_inBlockPos + h_inChunkCounter,h_chunks[idChunk].blocksPos, sizeof(VoxelBlockPos) * block_total, cudaMemcpyHostToDevice));
-                        h_chunks[idChunk].GPUorCPU = 1;
+                        // h_chunks[idChunk].isOnGPU = 1;
                         h_inChunkCounter += block_total;
+                    }else if(h_chunks[idChunk].isOccupied == false){
+                        h_chunks[idChunk].release();
                     }
                 }
             }
@@ -358,21 +389,21 @@ namespace ark {
             // }
         // }
 
-        std::cout<< "TOTAL: h_inChunkCounter === " <<h_inChunkCounter<<std::endl;
+        // std::cout<< "TOTAL: h_inChunkCounter === " <<h_inChunkCounter<<std::endl;
 
         if(h_inChunkCounter > 0){
             const dim3 grid_size((h_inChunkCounter + T_PER_BLOCK * T_PER_BLOCK - 1) / (T_PER_BLOCK * T_PER_BLOCK), 1);
             const dim3 block_size(T_PER_BLOCK * T_PER_BLOCK, 1);
 
-            printf(" streamInCPU2GPUKernel grid %d  block %d \n", (h_inChunkCounter + T_PER_BLOCK * T_PER_BLOCK - 1) / (T_PER_BLOCK * T_PER_BLOCK), T_PER_BLOCK * T_PER_BLOCK);
+            // printf(" streamInCPU2GPUKernel grid %d  block %d \n", (h_inChunkCounter + T_PER_BLOCK * T_PER_BLOCK - 1) / (T_PER_BLOCK * T_PER_BLOCK), T_PER_BLOCK * T_PER_BLOCK);
             
-            VoxelBlockPos *h_inBlockPos;
-            h_inBlockPos = (VoxelBlockPos *)malloc(sizeof(VoxelBlockPos) * h_inChunkCounter);
-            cudaSafeCall(cudaMemcpy(h_inBlockPos, d_inBlockPos, sizeof(VoxelBlockPos) * h_inChunkCounter, cudaMemcpyDeviceToHost));
+            // VoxelBlockPos *h_inBlockPos;
+            // h_inBlockPos = (VoxelBlockPos *)malloc(sizeof(VoxelBlockPos) * h_inChunkCounter);
+            // cudaSafeCall(cudaMemcpy(h_inBlockPos, d_inBlockPos, sizeof(VoxelBlockPos) * h_inChunkCounter, cudaMemcpyDeviceToHost));
 
-            VoxelBlock* h_inBlock;
-            h_inBlock = (VoxelBlock *)malloc(sizeof(VoxelBlock) * h_inChunkCounter);
-            cudaSafeCall(cudaMemcpy(h_inBlock, d_inBlock, sizeof(h_inBlock) * h_inChunkCounter, cudaMemcpyDeviceToHost));
+            // VoxelBlock* h_inBlock;
+            // h_inBlock = (VoxelBlock *)malloc(sizeof(VoxelBlock) * h_inChunkCounter);
+            // cudaSafeCall(cudaMemcpy(h_inBlock, d_inBlock, sizeof(h_inBlock) * h_inChunkCounter, cudaMemcpyDeviceToHost));
 
             // for(int i = 0; i < h_inChunkCounter; i += 1000){
             //     printf("blockpos[%d] at %d %d %d\n", i, h_inBlockPos[i].pos.x,h_inBlockPos[i].pos.y,h_inBlockPos[i].pos.z);
@@ -381,11 +412,11 @@ namespace ark {
 
             streamInCPU2GPUKernel<<<grid_size, block_size >>> (h_inChunkCounter, d_inBlock, d_inBlockPos, *dev_blockmap_chunks);
             // return;
-            cudaSafeCall(cudaDeviceSynchronize()); //debug
+            // cudaSafeCall(cudaDeviceSynchronize()); //debug
 
             // stream in
-            vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
-            bmhi(*dev_blockmap_chunks);
+            // vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
+            // bmhi(*dev_blockmap_chunks);
             // int count = 0;
             // for(int i = 0; i < *(bmhi.heap_counter); i ++){
             //     for(int j = 0; j < 4; j ++){
@@ -399,7 +430,7 @@ namespace ark {
             //         }
             //     }
             // }
-            printf("* get heap_counter %d \n", *(bmhi.heap_counter));
+            // printf("* get heap_counter %d \n", *(bmhi.heap_counter));
 
             // int recount = 0;
             // // stream in
@@ -425,7 +456,142 @@ namespace ark {
         }
     }
 
+    __global__ void getMapValueKernel(vhashing::HashTableBase<int3, VoxelBlock, BlockHasher, BlockEqual> dev_blockmap_,
+        VoxelBlock* d_outBlock, VoxelBlockPos* d_outBlockPosHeap){
+        const unsigned int idheap = blockIdx.x * blockDim.x + threadIdx.x;
+        if(idheap < *(dev_blockmap_.heap_counter)){
+            int3 pos = dev_blockmap_.key_heap[idheap];
+            d_outBlockPosHeap[idheap].pos = pos;
+            d_outBlock[idheap] = dev_blockmap_[pos];
+        }
+    }
+
     __host__ void GpuTsdfGenerator::streamOutGPU2CPU(){
+
+        VoxelBlock* d_outBlock;
+        VoxelBlockPos* d_outBlockPosHeap;
+
+
+        cudaSafeCall(cudaMalloc(&d_outBlock, sizeof(VoxelBlock) * h_heapBlockCounter));
+        cudaSafeCall(cudaMalloc(&d_outBlockPosHeap, sizeof(VoxelBlockPos) * h_heapBlockCounter));
+        
+        {
+
+            const dim3 grid_size((h_heapBlockCounter + T_PER_BLOCK - 1) / T_PER_BLOCK, 1);
+            const dim3 block_size(T_PER_BLOCK, 1);
+
+            getMapValueKernel <<< grid_size, block_size >>> (*dev_blockmap_, d_outBlock, d_outBlockPosHeap);
+
+        }
+
+        VoxelBlock* h_outBlock;
+        VoxelBlockPos* h_outBlockPosHeap;
+
+        h_outBlock = new VoxelBlock[h_heapBlockCounter];
+        h_outBlockPosHeap = new VoxelBlockPos[h_heapBlockCounter];
+
+        cudaSafeCall(cudaMemcpy(h_outBlock, d_outBlock, sizeof(VoxelBlock) * h_heapBlockCounter, cudaMemcpyDeviceToHost));
+        cudaSafeCall(cudaMemcpy(h_outBlockPosHeap, d_outBlockPosHeap, sizeof(VoxelBlockPos) * h_heapBlockCounter, cudaMemcpyDeviceToHost));
+
+        cudaFree(d_outBlock);
+        cudaFree(d_outBlockPosHeap);
+
+        std::unique_lock<std::mutex> lock(tri_mutex_);
+
+        // vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
+        // h_blockmap_(*dev_blockmap_);
+
+
+        // std::unique_lock<std::mutex> lock(tri_mutex_);
+        // std::unique_lock<std::mutex> lock(tsdf_mutex_);
+
+        int counter = h_heapBlockCounter;
+
+        int total_vox = VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK;
+
+        for(int i = 0; i < counter; i ++){
+            int3 pos = h_outBlockPosHeap[i].pos;
+            VoxelBlock& vb = h_outBlock[i];
+            int3 startpos = pos * make_int3(VOXEL_PER_BLOCK);
+            int3 chunkpos = block2chunk(pos);
+            int idChunk = chunkGetLinearIdx(chunkpos.x, chunkpos.y, chunkpos.z);
+
+            // if(chunkpos.x == 3 && chunkpos.y == 1 && chunkpos.z == -6){
+            //     printf("stream out Frame %d:  3 1 -6 in hash\n", countFrame);
+            // }
+            h_chunks[idChunk].isOccupied = true;
+
+            // printf("block(%d,%d,%d) in chunk %d at (%d,%d,%d)\n", pos.x, pos.y, pos.z, idChunk, chunkpos.x, chunkpos.y, chunkpos.z);
+            // assert(h_chunks[idChunk].isOnGPU == 1);
+
+            int idBlock = blockPos2Linear(pos);
+
+            int3 iddblock = blockLinear2Int3(idBlock) + chunkpos * BLOCK_PER_CHUNK;
+
+            // printf("(%d,%d,%d)   and  (%d,%d,%d)\n", iddblock.x, iddblock.y, iddblock.z, pos.x, pos.y, pos.z);
+            // assert(iddblock.x == pos.x && iddblock.y == pos.y && iddblock.z == pos.z);
+
+            memcpy(&(h_chunks[idChunk].blocks[idBlock]), &vb, sizeof(Voxel) * total_vox);
+
+            Triangle* tri_src = &hash_tri_[i * total_vox * 5];
+
+            Triangle* tri_dst = &(h_chunks[idChunk].tri_[idBlock * total_vox * 5]);
+
+            memcpy(tri_dst, tri_src, sizeof(Triangle) * total_vox * 5);
+
+            // printf("%f copy to %f\n", h_chunks[idChunk].blocks->voxels[5].sdf, vb.voxels[5].sdf);
+
+            // assert(h_chunks[idChunk].blocks->voxels[0].sdf == vb.voxels[0].sdf);
+        }
+
+        free(hash_tri_);
+
+        delete[] h_outBlock;
+        delete[] h_outBlockPosHeap;
+
+
+
+
+        // cudaSafeCall(cudaDeviceSynchronize()); //debug
+
+        // std::ofstream outFile;
+
+        // outFile.open("triangles_chunk"+ std::to_string(countFrame) + ".txt");
+
+        // {
+        //     int count = 0;
+        //     int chunk_half = MAX_CHUNK_NUM / 2;
+        //     int block_total = BLOCK_PER_CHUNK * BLOCK_PER_CHUNK * BLOCK_PER_CHUNK;
+        //     int total_vox = VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * block_total;
+        //     int tri_num = total_vox * 5;
+        //     int empty = 0;
+        //     for(int x = - chunk_half; x < chunk_half; x ++){
+        //         for(int y = - chunk_half; y < chunk_half; y ++){
+        //             for(int z = - chunk_half; z < chunk_half; z ++){
+        //                 int id = chunkGetLinearIdx(x,y,z);
+        //                 Triangle* tri_ = h_chunks[id].tri_;
+        //                 if(tri_ != nullptr){
+        //                     outFile << "-----------\t"<< x << "\t" <<y<<"\t"<<z<<"\t"<<"-----------\n";
+
+        //                     int count = 0;
+        //                     for(int i = 0; i < tri_num; i ++){
+        //                         if(!h_chunks[id].tri_[i].valid)
+        //                             continue;
+        //                         for (int j = 0; j < 3; ++j){
+        //                             outFile << tri_[i].p[j].x << "\t" << tri_[i].p[j].y << "\t" << tri_[i].p[j].z << "\t";
+        //                         }
+        //                         outFile << "\n";
+        //                     }
+        //                 }
+
+        //             }
+        //         }
+        //     }
+        // }
+
+        // outFile.close();
+
+        // delete h_blockmap_;
 
     }
 
@@ -475,8 +641,9 @@ namespace ark {
             // int pt_pix_x = roundf(K[0 * 3 + 0] * (pt_cam_x / pt_cam_z) + K[0 * 3 + 2]);
             // int pt_pix_y = roundf(K[1 * 3 + 1] * (pt_cam_y / pt_cam_z) + K[1 * 3 + 2]);
                         // Convert from base frame camera coordinates to current frame camera coordinates
-            float pt_base[3] = {voxelpos.x + param->vox_origin.x, 
-            voxelpos.y + param->vox_origin.y, voxelpos.z + param->vox_origin.z};// voxel2world(idVoxel, param->vox_size);
+            float pt_base[3] = {voxelpos.x,// + param->vox_origin.x, 
+            voxelpos.y,// + param->vox_origin.y, 
+            voxelpos.z};// + param->vox_origin.z};// voxel2world(idVoxel, param->vox_size);
 
             float tmp_pt[3] = {0};
             tmp_pt[0] = pt_base[0] - c2w[0 * 4 + 3];
@@ -553,18 +720,18 @@ namespace ark {
             if (diff <= -param->trunc_margin)
                 return;
 
-            if(pt_pix_x % DEBUG_WIDTH == 0 && pt_pix_y % DEBUG_HEIGHT == 0){
-                float depth_val = depth[pt_pix_y * width + pt_pix_x];
-                float diff = depth_val - pt_cam_z;
-                int3 idVoxel = world2voxel(make_float3(pt_base[0], pt_base[1], pt_base[2]), param->vox_size);
-                printf("good idVoxel\t(%d,%d,%d)\tpos\t(%f,%f,%f)\tcamera\t(%f,%f,%f)\tscreen\t(%d,%d)\tdepth\t%f\tdiff\t%f\n",
-                idVoxel.x, idVoxel.y, idVoxel.z, 
-                pt_base[0], pt_base[1], pt_base[2], 
-                pt_cam_x, pt_cam_y, pt_cam_z,
-                pt_pix_x, pt_pix_y,
-                depth_val, diff);
-                // printf("", diff,  -param->trunc_margin);
-            }
+            // if(pt_pix_x % DEBUG_WIDTH == 0 && pt_pix_y % DEBUG_HEIGHT == 0){
+            //     float depth_val = depth[pt_pix_y * width + pt_pix_x];
+            //     float diff = depth_val - pt_cam_z;
+            //     int3 idVoxel = world2voxel(make_float3(pt_base[0], pt_base[1], pt_base[2]), param->vox_size);
+            //     printf("good idVoxel\t(%d,%d,%d)\tpos\t(%f,%f,%f)\tcamera\t(%f,%f,%f)\tscreen\t(%d,%d)\tdepth\t%f\tdiff\t%f\n",
+            //     idVoxel.x, idVoxel.y, idVoxel.z, 
+            //     pt_base[0], pt_base[1], pt_base[2], 
+            //     pt_cam_x, pt_cam_y, pt_cam_z,
+            //     pt_pix_x, pt_pix_y,
+            //     depth_val, diff);
+            //     // printf("", diff,  -param->trunc_margin);
+            // }
 
             // Integrate
             int image_idx = pt_pix_y * width + pt_pix_x;
@@ -699,6 +866,13 @@ namespace ark {
 
         }
     }
+  
+        __host__ __device__
+    bool operator==(const Vertex &a, const Vertex &b){
+
+        return (a.x == b.x && a.y == b.y && a.z == b.z);
+    }
+
 
     __device__ int d_floor(float f){
         if(f >= 0.0)
@@ -716,10 +890,15 @@ namespace ark {
         // if(idheap != 100 || threadIdx.x != 7)
         //     return;
         // printf("heap\t%d\tvoxel\t%d\n",idheap, threadIdx.x);
-        if(idheap < *d_heapBlockCounter){
+        if(idheap < *d_heapBlockCounter){   
+            // if(blockIdx.x == 0 && threadIdx.x == 0)
+            //     printf("id heap == %d\n", idheap);
+
             int3 idBlock = dev_blockmap_.key_heap[idheap];
             VoxelBlock& vb = dev_blockmap_[idBlock];
-            Voxel& voxel = vb.voxels[threadIdx.x];
+            // Voxel& voxel = vb.voxels[threadIdx.x];
+            // if(blockIdx.x == 0 && threadIdx.x == 0)
+            //     printf("vb  ==\n");
 
             int VOXEL_PER_BLOCK2 = VOXEL_PER_BLOCK * VOXEL_PER_BLOCK;
             int z = threadIdx.x % VOXEL_PER_BLOCK + idBlock.z * VOXEL_PER_BLOCK;
@@ -727,6 +906,9 @@ namespace ark {
             int x = threadIdx.x / VOXEL_PER_BLOCK2 + idBlock.x * VOXEL_PER_BLOCK;
 
             GRIDCELL grid;
+
+            // printf("%d %d start \n",blockIdx.x, threadIdx.x);
+
             for (int k = 0; k < 8; ++k) {
 
                 int cxi = x + param->idxMap[k][0];
@@ -748,18 +930,30 @@ namespace ark {
                 if(dev_blockmap_.find(id_nb_block) != dev_blockmap_.end()){
                     grid.p[k] = Vertex(cxi, cyi, czi);
 
+                    // if(blockIdx.x == 0 && threadIdx.x == 0)
+                    //     printf(" hhhh \n");
 
                     VoxelBlock& nb_block = dev_blockmap_[id_nb_block];
+
+
+                    // if(blockIdx.x == 0 && threadIdx.x == 0)
+                    //     printf(" hhh00h \n");
+
                     Voxel& nb_voxel = nb_block.voxels[linear_id];
+
+
+                    // if(blockIdx.x == 0 && threadIdx.x == 0)
+                    //     printf(" hhxxhh \n");
 
                     grid.p[k].r = nb_voxel.sdf_color[0];
                     grid.p[k].g = nb_voxel.sdf_color[1];
                     grid.p[k].b = nb_voxel.sdf_color[2];
                     grid.val[k] = nb_voxel.sdf;
 
-                    if(x == DEBUG_X && y == DEBUG_Y && z == DEBUG_Z)
-                        printf("nbvoxel\t%d\t%d\t%d\tr%dg%db%d\tsdf%f\n", cxi, cyi, czi,grid.p[k].r,grid.p[k].g,grid.p[k].b, grid.val[k]);
-                        // printf("%d\tnbvoxel\t%d\t%d\t%d\tsdf=%f\n", linear_id, cxi, cyi, czi,voxel.sdf);
+                    // if(x == DEBUG_X && y == DEBUG_Y && z == DEBUG_Z)
+                    // if(blockIdx.x == 0 && threadIdx.x == 0)
+                    //     printf("nbvoxel\t%d\t%d\t%d\tr%dg%db%d\tsdf%f\n", cxi, cyi, czi,grid.p[k].r,grid.p[k].g,grid.p[k].b, grid.val[k]);
+                    //     // printf("%d\tnbvoxel\t%d\t%d\t%d\tsdf=%f\n", linear_id, cxi, cyi, czi,voxel.sdf);
                 }else{
                     // grid.p[k].r = 0;
                     // grid.p[k].g = 0;
@@ -768,8 +962,12 @@ namespace ark {
 
                     // if(x == DEBUG_X && y == DEBUG_Y && z == DEBUG_Z)
                     // if(x % 4 == 0 && y % 4 == 0 && z % 4 == 0)
+                    // if(blockIdx.x == 0 && threadIdx.x == 0)
+                    //     printf("return here\n");
+                    // printf("%d %d return \n",blockIdx.x, threadIdx.x);
+
                     return;
-                        printf("%d\tn_____l\t%d\t%d\t%d\tsdf=%f\n", linear_id, cxi, cyi, czi, grid.val[k]);
+                        // printf("%d\tn_____l\t%d\t%d\t%d\tsdf=%f\n", linear_id, cxi, cyi, czi, grid.val[k]);
                 }
 
                 // if(pt_grid_x == 20 && pt_grid_y == 8 && pt_grid_z == 0){
@@ -790,6 +988,10 @@ namespace ark {
             Vertex vertlist[12];
             if (param->edgeTable[cubeIndex] == 0)
                 return;
+
+            // if(blockIdx.x == 0 && threadIdx.x == 0)
+            //     printf("valid  ==\n");
+
 
             // if(x == 95 && y == 63 && z == 21)
             //     printf("\t%d\t%d\t%d\n", x, y, z);
@@ -838,8 +1040,9 @@ namespace ark {
             int index = idheap * (VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK) + threadIdx.x;
 
             int count = 0;
+            // int addr = 0;
             for (int ti = 0; param->triTable[cubeIndex][ti] != -1; ti += 3) {
-                int addr = atomicAdd(&d_valid_tri[0], 1);
+                // addr = atomicAdd(&d_valid_tri[0], 1);
                 // tri[addr].p[0] = vertlist[param->triTable[cubeIndex][ti]];
                 // tri[addr].p[1] = vertlist[param->triTable[cubeIndex][ti + 1]];
                 // tri[addr].p[2] = vertlist[param->triTable[cubeIndex][ti + 2]];
@@ -848,51 +1051,61 @@ namespace ark {
                 tri[index * 5 + count].p[1] = vertlist[param->triTable[cubeIndex][ti + 1]];
                 tri[index * 5 + count].p[2] = vertlist[param->triTable[cubeIndex][ti + 2]];
                 tri[index * 5 + count].valid = true;
+
+                if(tri[index * 5 + count].p[0] == tri[index * 5 + count].p[1] || 
+                    tri[index * 5 + count].p[1] == tri[index * 5 + count].p[2] || 
+                    tri[index * 5 + count].p[0] == tri[index * 5 + count].p[1])
+                    tri[index * 5 + count].valid = false;
+
                 count++;
             }
 
-            if(x % 4 == 0 && y % 4 == 0 && z % 4 == 0){
-
-                for (int k = 0; k < 8; ++k) {
-                    int cxi = x + param->idxMap[k][0];
-                    int cyi = y + param->idxMap[k][1];
-                    int czi = z + param->idxMap[k][2];
-
-                    int3 id_nb_block = voxel2block(make_int3(cxi,cyi,czi));
-
-                    // printf("current block\t%d\t%d\t%d\tvoxel\t%d\t%d\t%d\tnbvoxel\t%d\t%d\t%d\tblock\t%d\t%d\t%d\n", idBlock.x, idBlock.y, idBlock.z, x, y, z, cxi, cyi, czi, id_nb_block.x, id_nb_block.y, id_nb_block.z);
-                    if(cxi == x)
-                        assert(idBlock.x == id_nb_block.x);
-                    if(cyi == y)
-                        assert(idBlock.y == id_nb_block.y);                
-                    if(czi == z)
-                        assert(idBlock.z == id_nb_block.z);
-
-                    int linear_id = voxelLinearInBlock(make_int3(cxi, cyi,czi), id_nb_block);
-
-                    if(dev_blockmap_.find(id_nb_block) != dev_blockmap_.end()){
-                        grid.p[k] = Vertex(cxi, cyi, czi);
+            // if(blockIdx.x == 0 && threadIdx.x == 0)
+            // printf("%d %d count  ==  %d   valid == %d\n",blockIdx.x, threadIdx.x, count, addr);
 
 
-                        VoxelBlock& nb_block = dev_blockmap_[id_nb_block];
-                        Voxel& nb_voxel = nb_block.voxels[linear_id];
+            // if(x % 4 == 0 && y % 4 == 0 && z % 4 == 0){
 
-                        grid.p[k].r = nb_voxel.sdf_color[0];
-                        grid.p[k].g = nb_voxel.sdf_color[1];
-                        grid.p[k].b = nb_voxel.sdf_color[2];
-                        grid.val[k] = nb_voxel.sdf;
-                        printf("hashmesh\t%d\t%d\t%d\tr%dg%db%d\tsdf%f\n", cxi, cyi, czi,grid.p[k].r,grid.p[k].g,grid.p[k].b, grid.val[k]);
+            //     for (int k = 0; k < 8; ++k) {
+            //         int cxi = x + param->idxMap[k][0];
+            //         int cyi = y + param->idxMap[k][1];
+            //         int czi = z + param->idxMap[k][2];
 
-                    }
-                }
+            //         int3 id_nb_block = voxel2block(make_int3(cxi,cyi,czi));
 
-            }
+            //         // printf("current block\t%d\t%d\t%d\tvoxel\t%d\t%d\t%d\tnbvoxel\t%d\t%d\t%d\tblock\t%d\t%d\t%d\n", idBlock.x, idBlock.y, idBlock.z, x, y, z, cxi, cyi, czi, id_nb_block.x, id_nb_block.y, id_nb_block.z);
+            //         if(cxi == x)
+            //             assert(idBlock.x == id_nb_block.x);
+            //         if(cyi == y)
+            //             assert(idBlock.y == id_nb_block.y);                
+            //         if(czi == z)
+            //             assert(idBlock.z == id_nb_block.z);
 
-            if(x == DEBUG_X && y == DEBUG_Y && z == DEBUG_Z)
-                printf("hashmesh\t%d\t%d\t%d\tcount=%d\n", x, y, z, count);
+            //         int linear_id = voxelLinearInBlock(make_int3(cxi, cyi,czi), id_nb_block);
+
+            //         if(dev_blockmap_.find(id_nb_block) != dev_blockmap_.end()){
+            //             grid.p[k] = Vertex(cxi, cyi, czi);
+
+
+            //             VoxelBlock& nb_block = dev_blockmap_[id_nb_block];
+            //             Voxel& nb_voxel = nb_block.voxels[linear_id];
+
+            //             grid.p[k].r = nb_voxel.sdf_color[0];
+            //             grid.p[k].g = nb_voxel.sdf_color[1];
+            //             grid.p[k].b = nb_voxel.sdf_color[2];
+            //             grid.val[k] = nb_voxel.sdf;
+            //             printf("hashmesh\t%d\t%d\t%d\tr%dg%db%d\tsdf%f\n", cxi, cyi, czi,grid.p[k].r,grid.p[k].g,grid.p[k].b, grid.val[k]);
+
+            //         }
+            //     }
+
+            // }
+
+            // if(x == DEBUG_X && y == DEBUG_Y && z == DEBUG_Z)
+            //     printf("hashmesh\t%d\t%d\t%d\tcount=%d\n", x, y, z, count);
 
             // printf("count tri %d\n", index * 5 + count);
-            assert(count != 0);
+            // assert(count != 0);
         }
     }
 
@@ -1023,10 +1236,13 @@ namespace ark {
 
     __host__
     void GpuTsdfGenerator::clearheap(){
-        unsigned int src = 0;
-        // cudaSafeCall(cudaFree(d_heapBlockCounter));
-        cudaSafeCall(cudaMemcpy(d_heapBlockCounter, &src, sizeof(unsigned int), cudaMemcpyHostToDevice));
-        std::cout<<" d_heapBlockCounter clear "<<std::endl;
+        // unsigned int src = 0;
+        // // cudaSafeCall(cudaFree(d_heapBlockCounter));
+        // cudaSafeCall(cudaMemcpy(d_heapBlockCounter, &src, sizeof(unsigned int), cudaMemcpyHostToDevice));
+        // std::cout<<" d_heapBlockCounter clear "<<std::endl;
+        dev_blockmap_->clearheap();
+        dev_blockmap_chunks->clearheap();
+        // d_heapBlockCounter = 0;
     }
 
     __host__
@@ -1054,32 +1270,30 @@ namespace ark {
         /***                     ----- hashing parameters -----             ***/
         chunk_size = BLOCK_PER_CHUNK * VOXEL_PER_BLOCK * vox_size;
 
-        cudaSafeCall(cudaMalloc(&d_outBlock, sizeof(VoxelBlock) * MAX_CPU2GPU_BLOCKS));
-        std::cout<<" d_outBlock init "<<std::endl;
-        cudaSafeCall(cudaMalloc(&d_outBlockPos, sizeof(VoxelBlockPos) * MAX_CPU2GPU_BLOCKS));
-        std::cout<<" d_outBlockPos init "<<std::endl;
+        // cudaSafeCall(cudaMalloc(&d_outBlock, sizeof(VoxelBlock) * MAX_CPU2GPU_BLOCKS));
+        // std::cout<<" d_outBlock init "<<std::endl;
+        // cudaSafeCall(cudaMalloc(&d_outBlockPos, sizeof(VoxelBlockPos) * MAX_CPU2GPU_BLOCKS));
+        // std::cout<<" d_outBlockPos init "<<std::endl;
         cudaSafeCall(cudaMalloc(&d_inBlock, sizeof(VoxelBlock) * MAX_CPU2GPU_BLOCKS));
         std::cout<<" d_inBlock init "<<std::endl;
         cudaSafeCall(cudaMalloc(&d_inBlockPos, sizeof(VoxelBlockPos) * MAX_CPU2GPU_BLOCKS));
         std::cout<<" d_inBlockPos init "<<std::endl;
         cudaSafeCall(cudaMalloc(&d_inBlockPosHeap, sizeof(VoxelBlockPos) * MAX_CPU2GPU_BLOCKS));
         std::cout<<" d_inBlockPosHeap init "<<std::endl;
-        cudaSafeCall(cudaMalloc(&d_outBlockCounter, sizeof(unsigned int)));
-        std::cout<<" d_outBlockCounter init "<<std::endl;
+        // cudaSafeCall(cudaMalloc(&d_outBlockCounter, sizeof(unsigned int)));
+        // std::cout<<" d_outBlockCounter init "<<std::endl;
         d_heapBlockCounter = NULL;
         cudaSafeCall(cudaMalloc((void**)&d_heapBlockCounter, sizeof(unsigned int)));
 
         // vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace>
         //     blocks(10000, 2, 19997, int3{999999, 999999, 999999});
 
+        // dev_blockmap_ = new vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace>(100001, 4, 400000, int3{999999, 999999, 999999});
+        // std::cout<<" dev_blockmap_ init "<<std::endl;
 
-
-        std::cout<<" d_heapBlockCounter init "<<std::endl;
-        dev_blockmap_chunks = new vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace>(100001, 4, 400000, int3{999999, 999999, 999999});
-        std::cout<<" dev_blockmap_chunks init "<<std::endl;
-
-        dev_blockmap_ = new vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace>(100001, 4, 400000, int3{999999, 999999, 999999});
-        std::cout<<" dev_blockmap_ init "<<std::endl;
+        // std::cout<<" d_heapBlockCounter init "<<std::endl;
+        // dev_blockmap_chunks = new vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace>(100001, 4, 400000, int3{999999, 999999, 999999});
+        // std::cout<<" dev_blockmap_chunks init "<<std::endl;
 
         h_chunks = new Chunk[MAX_CHUNK_NUM * MAX_CHUNK_NUM * MAX_CHUNK_NUM];        
         std::cout<<" h_chunks init "<<std::endl;
@@ -1118,16 +1332,16 @@ namespace ark {
         param_->cx = cx;
         param_->cy = cy;
 
-        // Initialize voxel grid
-        TSDF_ = new float[param_->total_vox];
-        TSDF_color_ = new unsigned char[3 * param_->total_vox];
-        weight_ = new float[param_->total_vox];
-        memset(TSDF_, 1.0f, sizeof(float) * param_->total_vox);
-        memset(TSDF_color_, 0.0f, 3 * sizeof(unsigned char) * param_->total_vox);
-        memset(weight_, 0.0f, sizeof(float) * param_->total_vox);
+        // // Initialize voxel grid
+        // TSDF_ = new float[param_->total_vox];
+        // TSDF_color_ = new unsigned char[3 * param_->total_vox];
+        // weight_ = new float[param_->total_vox];
+        // memset(TSDF_, 1.0f, sizeof(float) * param_->total_vox);
+        // memset(TSDF_color_, 0.0f, 3 * sizeof(unsigned char) * param_->total_vox);
+        // memset(weight_, 0.0f, sizeof(float) * param_->total_vox);
 
         tri_ = (Triangle *) malloc(sizeof(Triangle) * param_->total_vox * 5);
-
+        
         // Load variables to GPU memory
         cudaMalloc(&dev_param_, sizeof(MarchingCubeParam));
         cudaMalloc(&dev_TSDF_, param_->total_vox * sizeof(float));
@@ -1135,17 +1349,17 @@ namespace ark {
                    3 * param_->total_vox * sizeof(unsigned char));
         cudaMalloc(&dev_weight_,
                    param_->total_vox * sizeof(float));
-        cudaMalloc(&dev_tri_, sizeof(Triangle) * param_->total_vox * 5);
+        // cudaMalloc(&dev_tri_, sizeof(Triangle) * param_->total_vox * 5);
         checkCUDA(__LINE__, cudaGetLastError());
 
         cudaMemcpy(dev_param_, param_, sizeof(MarchingCubeParam), cudaMemcpyHostToDevice);
-        cudaMemcpy(dev_TSDF_, TSDF_,
-                   param_->total_vox * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(dev_TSDF_color_, TSDF_color_,
-                   3 * param_->total_vox * sizeof(unsigned char),
-                   cudaMemcpyHostToDevice);
-        cudaMemcpy(dev_weight_, weight_,
-                   param_->total_vox * sizeof(float), cudaMemcpyHostToDevice);
+        // cudaMemcpy(dev_TSDF_, TSDF_,
+                   // param_->total_vox * sizeof(float), cudaMemcpyHostToDevice);
+        // cudaMemcpy(dev_TSDF_color_, TSDF_color_,
+        //            3 * param_->total_vox * sizeof(unsigned char),
+        //            cudaMemcpyHostToDevice);
+        // cudaMemcpy(dev_weight_, weight_,
+        //            param_->total_vox * sizeof(float), cudaMemcpyHostToDevice);
         checkCUDA(__LINE__, cudaGetLastError());
 
         cudaMalloc(&dev_K_, 3 * 3 * sizeof(float));
@@ -1157,45 +1371,45 @@ namespace ark {
 
     }
 
-    __host__
-    void inverse_matrix(float* m, float* minv){
-        // computes the inverse of a matrix m
-        std::cout<<" m = "<<std::endl;
+    // __host__
+    // void inverse_matrix(float* m, float* minv){
+    //     // computes the inverse of a matrix m
+    //     std::cout<<" m = "<<std::endl;
 
-        for(int r=0;r<3;++r){
-            for(int c=0;c<3;++c){
-                // m[r * 3 + c] = c2w_[r * 4 + c];
-                printf("%f\t",m[r * 3 + c]);
-            }
-            std::cout<<std::endl;
-        }
+    //     for(int r=0;r<3;++r){
+    //         for(int c=0;c<3;++c){
+    //             // m[r * 3 + c] = c2w_[r * 4 + c];
+    //             printf("%f\t",m[r * 3 + c]);
+    //         }
+    //         std::cout<<std::endl;
+    //     }
 
-        double det = m[0 * 3 + 0] * (m[1 * 3 + 1] * m[2 * 3 + 2] - m[2 * 3 + 1] * m[1 * 3 + 2]) -
-                     m[0 * 3 + 1] * (m[1 * 3 + 0] * m[2 * 3 + 2] - m[1 * 3 + 2] * m[2 * 3 + 0]) +
-                     m[0 * 3 + 2] * (m[1 * 3 + 0] * m[2 * 3 + 1] - m[1 * 3 + 1] * m[2 * 3 + 0]);
+    //     double det = m[0 * 3 + 0] * (m[1 * 3 + 1] * m[2 * 3 + 2] - m[2 * 3 + 1] * m[1 * 3 + 2]) -
+    //                  m[0 * 3 + 1] * (m[1 * 3 + 0] * m[2 * 3 + 2] - m[1 * 3 + 2] * m[2 * 3 + 0]) +
+    //                  m[0 * 3 + 2] * (m[1 * 3 + 0] * m[2 * 3 + 1] - m[1 * 3 + 1] * m[2 * 3 + 0]);
 
-        double invdet = 1 / det;
+    //     double invdet = 1 / det;
 
-        std::cout<<" inverse "<<std::endl;
+    //     std::cout<<" inverse "<<std::endl;
 
-        // inverse_matrix(m, minv);
-        for(int r=0;r<3;++r){
-            for(int c=0;c<3;++c){
-                printf("%f\t",minv[r * 3 + c]);
-            }
-            std::cout<<std::endl;
-        }
+    //     // inverse_matrix(m, minv);
+    //     for(int r=0;r<3;++r){
+    //         for(int c=0;c<3;++c){
+    //             printf("%f\t",minv[r * 3 + c]);
+    //         }
+    //         std::cout<<std::endl;
+    //     }
 
-        minv[0 * 3 + 0] = (m[1 * 3 + 1] * m[2 * 3 + 2] - m[2 * 3 + 1] * m[1 * 3 + 2]) * invdet;
-        minv[0 * 3 + 1] = (m[0 * 3 + 2] * m[2 * 3 + 1] - m[0 * 3 + 1] * m[2 * 3 + 2]) * invdet;
-        minv[0 * 3 + 2] = (m[0 * 3 + 1] * m[1 * 3 + 2] - m[0 * 3 + 2] * m[1 * 3 + 1]) * invdet;
-        minv[1 * 3 + 0] = (m[1 * 3 + 2] * m[2 * 3 + 0] - m[1 * 3 + 0] * m[2 * 3 + 2]) * invdet;
-        minv[1 * 3 + 1] = (m[0 * 3 + 0] * m[2 * 3 + 2] - m[0 * 3 + 2] * m[2 * 3 + 0]) * invdet;
-        minv[1 * 3 + 2] = (m[1 * 3 + 0] * m[0 * 3 + 2] - m[0 * 3 + 0] * m[1 * 3 + 2]) * invdet;
-        minv[2 * 3 + 0] = (m[1 * 3 + 0] * m[2 * 3 + 1] - m[2 * 3 + 0] * m[1 * 3 + 1]) * invdet;
-        minv[2 * 3 + 1] = (m[2 * 3 + 0] * m[0 * 3 + 1] - m[0 * 3 + 0] * m[2 * 3 + 1]) * invdet;
-        minv[2 * 3 + 2] = (m[0 * 3 + 0] * m[1 * 3 + 1] - m[1 * 3 + 0] * m[0 * 3 + 1]) * invdet;
-    }
+    //     minv[0 * 3 + 0] = (m[1 * 3 + 1] * m[2 * 3 + 2] - m[2 * 3 + 1] * m[1 * 3 + 2]) * invdet;
+    //     minv[0 * 3 + 1] = (m[0 * 3 + 2] * m[2 * 3 + 1] - m[0 * 3 + 1] * m[2 * 3 + 2]) * invdet;
+    //     minv[0 * 3 + 2] = (m[0 * 3 + 1] * m[1 * 3 + 2] - m[0 * 3 + 2] * m[1 * 3 + 1]) * invdet;
+    //     minv[1 * 3 + 0] = (m[1 * 3 + 2] * m[2 * 3 + 0] - m[1 * 3 + 0] * m[2 * 3 + 2]) * invdet;
+    //     minv[1 * 3 + 1] = (m[0 * 3 + 0] * m[2 * 3 + 2] - m[0 * 3 + 2] * m[2 * 3 + 0]) * invdet;
+    //     minv[1 * 3 + 2] = (m[1 * 3 + 0] * m[0 * 3 + 2] - m[0 * 3 + 0] * m[1 * 3 + 2]) * invdet;
+    //     minv[2 * 3 + 0] = (m[1 * 3 + 0] * m[2 * 3 + 1] - m[2 * 3 + 0] * m[1 * 3 + 1]) * invdet;
+    //     minv[2 * 3 + 1] = (m[2 * 3 + 0] * m[0 * 3 + 1] - m[0 * 3 + 0] * m[2 * 3 + 1]) * invdet;
+    //     minv[2 * 3 + 2] = (m[0 * 3 + 0] * m[1 * 3 + 1] - m[1 * 3 + 0] * m[0 * 3 + 1]) * invdet;
+    // }
 
 
     __host__
@@ -1269,6 +1483,15 @@ namespace ark {
 
     __host__
     void GpuTsdfGenerator::processFrame(float *depth, unsigned char *rgb, float *c2w) {
+
+
+        dev_blockmap_ = new vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace>(100001, 4, 400000, int3{999999, 999999, 999999});
+        // std::cout<<" dev_blockmap_ init "<<std::endl;
+
+        // std::cout<<" d_heapBlockCounter init "<<std::endl;
+        dev_blockmap_chunks = new vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::device_memspace>(100001, 4, 400000, int3{999999, 999999, 999999});
+        // std::cout<<" dev_blockmap_chunks init "<<std::endl;
+
         cudaMemcpy(dev_c2w_, c2w, 4 * 4 * sizeof(float), cudaMemcpyHostToDevice);
         cudaMemcpy(dev_depth_, depth, im_height_ * im_width_ * sizeof(float), cudaMemcpyHostToDevice);
         cudaMemcpy(dev_rgb_, rgb, 3 * im_height_ * im_width_ * sizeof(unsigned char), cudaMemcpyHostToDevice);
@@ -1276,7 +1499,7 @@ namespace ark {
 
         memcpy(c2w_, c2w, 4 * 4 * sizeof(float));
 
-        std::cout<< "before streamInCPU2GPU ===  clear " <<std::endl;
+        // std::cout<< "clear h_heapBlockCounter" <<std::endl;
         clearheap();
 
         streamInCPU2GPU(dev_K_, dev_c2w_, dev_depth_);
@@ -1288,13 +1511,13 @@ namespace ark {
 
         Triangle *dev_hash_tri_ = nullptr;
         unsigned int *d_valid_tri;
+        unsigned int h_valid_tri = 0;
         cudaSafeCall(cudaMalloc(&d_valid_tri, sizeof(unsigned int)));
         int tri_0;
         cudaSafeCall(cudaMemcpy(d_valid_tri, &tri_0, sizeof(unsigned int), cudaMemcpyHostToDevice));
 
-        unsigned int h_heapBlockCounter;
         cudaSafeCall(cudaMemcpy(&h_heapBlockCounter,d_heapBlockCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost));
-        std::cout<<"h_heapBlockCounter == "<<h_heapBlockCounter<<std::endl;
+        // std::cout<<"h_heapBlockCounter = "<<h_heapBlockCounter<<std::endl;
 
         unsigned int total_vox = h_heapBlockCounter * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK;
 
@@ -1304,95 +1527,114 @@ namespace ark {
             const dim3 blockSize(VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK, 1);
             checkCUDA(__LINE__, cudaGetLastError());
 
-            std::cout<<"before IntegrateHashKernel == "<<std::endl;
+            // std::cout<<"start IntegrateHashKernel"<<std::endl;
 
             IntegrateHashKernel <<< gridSize, blockSize >>> (dev_K_, dev_c2w_, dev_depth_, dev_rgb_, 
                 im_height_, im_width_, dev_param_, *dev_blockmap_, d_inBlockPosHeap, d_heapBlockCounter);
 
             checkCUDA(__LINE__, cudaGetLastError());
-            std::cout<<"after IntegrateHashKernel == "<<std::endl;
+            // std::cout<<"finish IntegrateHashKernel"<<std::endl;
 
 
             cudaMalloc(&dev_hash_tri_, sizeof(Triangle) * total_vox * 5);
-
-
             cudaMemset(dev_hash_tri_, 0, sizeof(Triangle) * total_vox * 5);
+
+            // std::cout<<"start marchingCubeHashKernel"<<std::endl;
+
             marchingCubeHashKernel << < gridSize, blockSize >> >
                                                        (*dev_blockmap_, d_valid_tri, d_heapBlockCounter, dev_hash_tri_, dev_param_);
             checkCUDA(__LINE__, cudaGetLastError());
 
-            unsigned int h_valid_tri = 0;
             cudaSafeCall(cudaMemcpy(&h_valid_tri, d_valid_tri, sizeof(unsigned int), cudaMemcpyDeviceToHost));
 
-            std::cout<<"after marchingCubeHashKernel == "<<h_valid_tri<<std::endl;
-
+            // std::cout<<"finish marchingCubeHashKernel"<<std::endl;
         }
+
         
+        hash_tri_ = (Triangle *) malloc(sizeof(Triangle) * total_vox * 5);
+
+
+        // cudaSafeCall(cudaMemcpy(h_inBlockPosHeap, dev_blockmap_->key_heap, sizeof(VoxelBlockPos) * h_heapBlockCounter, cudaMemcpyDeviceToHost));
+
         {
             std::unique_lock<std::mutex> lock(tri_mutex_);
-            Triangle* hash_tri_ = (Triangle *) malloc(sizeof(Triangle) * total_vox * 5);
-            cudaMemcpy(tri_, dev_hash_tri_, sizeof(Triangle) * total_vox * 5, cudaMemcpyDeviceToHost);
+            // cudaMemcpy(tri_, dev_hash_tri_, sizeof(Triangle) * total_vox * 5, cudaMemcpyDeviceToHost);
+            // checkCUDA(__LINE__, cudaGetLastError());
+            cudaMemcpy(hash_tri_, dev_hash_tri_, sizeof(Triangle) * total_vox * 5, cudaMemcpyDeviceToHost);
             checkCUDA(__LINE__, cudaGetLastError());
-            int count = 0;
-            for (int i = 0; i < total_vox * 5; ++i) {
-                if (!tri_[i].valid)
-                    continue;
-                count ++;
-            }
-            printf("valid tri == %d \n", count);
         }
 
-        // // // getLocalGrid();
+        // std::ofstream outFile;
+        // outFile.open("triangles_hash"+ std::to_string(countFrame) + ".txt");
 
-        // {
-        //     std::unique_lock<std::mutex> lock(tsdf_mutex_);
-        //     Integrate << < param_->vox_dim.z, param_->vox_dim.y >> >
-        //                                       (dev_K_, dev_c2w_, dev_depth_, dev_rgb_, im_height_, im_width_, dev_TSDF_, dev_TSDF_color_, dev_weight_, dev_param_);
-
-        //     checkCUDA(__LINE__, cudaGetLastError());
-
-        //     cudaMemset(dev_tri_, 0, sizeof(Triangle) * param_->total_vox * 5);
-        //     marchingCubeKernel << < param_->vox_dim.z, param_->vox_dim.y >> >
-        //                                                (dev_TSDF_, dev_TSDF_color_, dev_tri_, dev_param_);
-        //     checkCUDA(__LINE__, cudaGetLastError());
+        // int count_tri = 0;
+        // for(int i = 0; i < total_vox * 5; i ++){
+        //     if(hash_tri_[i].valid){
+        //         for (int j = 0; j < 3; ++j){
+        //             outFile << hash_tri_[i].p[j].x << "\t" << hash_tri_[i].p[j].y << "\t" << hash_tri_[i].p[j].z << "\t";
+        //         }
+        //         outFile << "\n";
+        //         count_tri ++;
+        //     }
         // }
+        // outFile.close();
 
+        // std::cout<<"  count_tri == " <<count_tri<<"  total =="<< total_vox * 5<<std::endl;
 
-        // {
-        //     std::unique_lock<std::mutex> lock(tri_mutex_);
-        //     cudaMemcpy(tri_, dev_tri_, sizeof(Triangle) * param_->total_vox * 5, cudaMemcpyDeviceToHost);
-        //     checkCUDA(__LINE__, cudaGetLastError());
-        // }
+        // printf("start streamOut\n");
+        streamOutGPU2CPU();
+        // printf("end streamOut\n");
+
+        cudaFree(dev_hash_tri_);
+        cudaFree(d_valid_tri);
+
+        delete dev_blockmap_;
+        delete dev_blockmap_chunks;
+        // printf(" release space \n");
+        //streamOut
+
+        countFrame ++;
+
     }
 
     __host__ 
     void GpuTsdfGenerator::insert_tri(){
 
+        // for(int i = 0; i < h_heapBlockCounter; i ++){
+        //     for(int k = 0; k < 8; k ++){
 
+        //     }
+        // }
 
-        {
-            std::unique_lock<std::mutex> lock(tsdf_mutex_);
-            cudaMemcpy(TSDF_, dev_TSDF_,
-                       param_->total_vox * sizeof(float), cudaMemcpyDeviceToHost);
-            cudaMemcpy(TSDF_color_, dev_TSDF_color_,
-                       3 * param_->total_vox * sizeof(unsigned char), cudaMemcpyDeviceToHost);
+        // {
+        //     std::unique_lock<std::mutex> lock(tsdf_mutex_);
+        //     cudaMemcpy(TSDF_, dev_TSDF_,
+        //                param_->total_vox * sizeof(float), cudaMemcpyDeviceToHost);
+        //     cudaMemcpy(TSDF_color_, dev_TSDF_color_,
+        //                3 * param_->total_vox * sizeof(unsigned char), cudaMemcpyDeviceToHost);
 
-            checkCUDA(__LINE__, cudaGetLastError());
-        }
+        //     checkCUDA(__LINE__, cudaGetLastError());
+        // }
     }
 
     __host__
     void GpuTsdfGenerator::Shutdown() {
         free(tri_);
-        cudaFree(dev_TSDF_);
-        cudaFree(dev_TSDF_color_);
-        cudaFree(dev_weight_);
+        // cudaFree(dev_TSDF_);
+        // cudaFree(dev_TSDF_color_);
+        // cudaFree(dev_weight_);
         cudaFree(dev_K_);
         cudaFree(dev_c2w_);
         cudaFree(dev_depth_);
         cudaFree(dev_rgb_);
-        cudaFree(dev_tri_);
+        // cudaFree(dev_tri_);
         cudaFree(dev_param_);
+        cudaFree(d_inBlock);
+        cudaFree(d_inBlockPos);
+        cudaFree(d_inBlockPosHeap);
+
+        delete dev_blockmap_;
+        delete dev_blockmap_chunks;
     }
 
     __host__ __device__
@@ -1453,33 +1695,65 @@ namespace ark {
 
     __host__
     void GpuTsdfGenerator::SavePLY(std::string filename) {
-        {
-            std::unique_lock<std::mutex> lock(tsdf_mutex_);
-            cudaMemcpy(TSDF_, dev_TSDF_,
-                       param_->total_vox * sizeof(float), cudaMemcpyDeviceToHost);
-            cudaMemcpy(TSDF_color_, dev_TSDF_color_,
-                       3 * param_->total_vox * sizeof(unsigned char), cudaMemcpyDeviceToHost);
+        // {
+        //     std::unique_lock<std::mutex> lock(tsdf_mutex_);
+        //     cudaMemcpy(TSDF_, dev_TSDF_,
+        //                param_->total_vox * sizeof(float), cudaMemcpyDeviceToHost);
+        //     cudaMemcpy(TSDF_color_, dev_TSDF_color_,
+        //                3 * param_->total_vox * sizeof(unsigned char), cudaMemcpyDeviceToHost);
 
-            checkCUDA(__LINE__, cudaGetLastError());
-        }
+        //     checkCUDA(__LINE__, cudaGetLastError());
+        // }
         tsdf2mesh(filename);
     }
 
     __host__
     void GpuTsdfGenerator::render() {
-        std::unique_lock<std::mutex> lock(tri_mutex_);
-        for (int i = 0; i < param_->total_vox * 5; ++i) {
-            if (!tri_[i].valid)
-                continue;
-            glBegin(GL_TRIANGLES);
-            for (int j = 0; j < 3; ++j) {
-                glColor3f(tri_[i].p[j].r / 255.f, tri_[i].p[j].g / 255.f, tri_[i].p[j].b / 255.f);
-                glVertex3f(10 * tri_[i].p[j].x * param_->vox_size - 15,
-                           -10 * tri_[i].p[j].y * param_->vox_size + 15,
-                           -10 * tri_[i].p[j].z * param_->vox_size + 10);
-                // printf("\t%d\t%d\t%\n", tri_[i].p[j].x, tri_[i].p[j].y, tri_[i].p[j].z);
+        std::unique_lock<std::mutex> lock(chunk_mutex_);
+        // for (int i = 0; i < param_->total_vox * 5; ++i) {
+        //     if (!tri_[i].valid)
+        //         continue;
+        //     glBegin(GL_TRIANGLES);
+        //     for (int j = 0; j < 3; ++j) {
+        //         glColor3f(tri_[i].p[j].r / 255.f, tri_[i].p[j].g / 255.f, tri_[i].p[j].b / 255.f);
+        //         glVertex3f(10 * tri_[i].p[j].x * param_->vox_size - 25,
+        //                    10 * tri_[i].p[j].y * param_->vox_size - 25,
+        //                    10 * tri_[i].p[j].z * param_->vox_size - 20);
+        //         // printf("\t%d\t%d\t%\n", tri_[i].p[j].x, tri_[i].p[j].y, tri_[i].p[j].z);
+        //     }
+        //     glEnd();
+        // }
+        int chunk_half = MAX_CHUNK_NUM / 2;
+        int block_total = BLOCK_PER_CHUNK * BLOCK_PER_CHUNK * BLOCK_PER_CHUNK;
+        int total_vox = VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * block_total;
+        int tri_num = total_vox * 5;
+        // int empty = 0;
+        for(int x = - chunk_half; x < chunk_half; x ++){
+            for(int y = - chunk_half; y < chunk_half; y ++){
+                for(int z = - chunk_half; z < chunk_half; z ++){
+                    int id = chunkGetLinearIdx(x,y,z);
+                    Triangle* tri_ = h_chunks[id].tri_;
+                    if(tri_ != nullptr){
+                        int count = 0;
+                        for(int i = 0; i < tri_num; i ++){
+                            if(!h_chunks[id].tri_[i].valid)
+                                continue;
+                            count ++;
+                            glBegin(GL_TRIANGLES);
+                            for (int j = 0; j < 3; ++j) {
+                                glColor3f(tri_[i].p[j].r / 255.f, tri_[i].p[j].g / 255.f, tri_[i].p[j].b / 255.f);
+                                glVertex3f(10 * tri_[i].p[j].x * param_->vox_size - 25,
+                                           10 * tri_[i].p[j].y * param_->vox_size - 25,
+                                           10 * tri_[i].p[j].z * param_->vox_size - 20);
+                            }
+                            glEnd();
+                        }
+                        if(count == 0)
+                            h_chunks[id].isOccupied = false;
+                    }
+
+                }
             }
-            glEnd();
         }
     }
 
@@ -1489,128 +1763,110 @@ namespace ark {
         std::vector<Vertex> vertices;
 
         // std::unordered_map<std::string, int> verticesIdx;
-        std::vector<std::list<std::pair<Vertex, int>>> hash_table(param_->total_vox,
-                                                                  std::list<std::pair<Vertex, int>>());
+        // std::vector<std::list<std::pair<Vertex, int>>> hash_table(param_->total_vox,
+                                                                  // std::list<std::pair<Vertex, int>>());
+        std::unique_lock<std::mutex> lock(chunk_mutex_);
 
-        int vertexCount = 0;
-        int emptyCount = 0;
+        // int vertexCount = 0;
+        // int emptyCount = 0;
+        int totalsize = 0;
+        int validCount = 0;
 
         std::cout << "Start saving ply, totalsize: " << param_->total_vox << std::endl;
-        for (size_t i = 0; i < param_->total_vox; ++i) {
-            int zi = i / (param_->vox_dim.x * param_->vox_dim.y);
-            int yi = (i - zi * param_->vox_dim.x * param_->vox_dim.y) / param_->vox_dim.x;
-            int xi = i - zi * param_->vox_dim.x * param_->vox_dim.y - yi * param_->vox_dim.x;
-            if (xi == param_->vox_dim.x - 1 || yi == param_->vox_dim.y - 1 || zi == param_->vox_dim.z - 1)
-                continue;
-            GRIDCELL grid;
-            std::vector<std::vector<int>> idx_map = {{0, 0, 0},
-                                                     {0, 1, 0},
-                                                     {1, 1, 0},
-                                                     {1, 0, 0},
-                                                     {0, 0, 1},
-                                                     {0, 1, 1},
-                                                     {1, 1, 1},
-                                                     {1, 0, 1}};
-            for (int k = 0; k < 8; ++k) {
-                int cxi = xi + idx_map[k][0];
-                int cyi = yi + idx_map[k][1];
-                int czi = zi + idx_map[k][2];
-                grid.p[k] = Vertex(cxi, cyi, czi);
-                grid.p[k].r = TSDF_color_[3 * (czi * param_->vox_dim.y * param_->vox_dim.z +
-                                               cyi * param_->vox_dim.z + cxi)];
-                grid.p[k].g = TSDF_color_[
-                        3 * (czi * param_->vox_dim.y * param_->vox_dim.z + cyi * param_->vox_dim.z + cxi) + 1];
-                grid.p[k].b = TSDF_color_[
-                        3 * (czi * param_->vox_dim.y * param_->vox_dim.z + cyi * param_->vox_dim.z + cxi) + 2];
-                grid.val[k] = TSDF_[czi * param_->vox_dim.y * param_->vox_dim.z + cyi * param_->vox_dim.z +
-                                    cxi];
-            }
 
-            int cubeIndex = 0;
-            if (grid.val[0] < 0) cubeIndex |= 1;
-            if (grid.val[1] < 0) cubeIndex |= 2;
-            if (grid.val[2] < 0) cubeIndex |= 4;
-            if (grid.val[3] < 0) cubeIndex |= 8;
-            if (grid.val[4] < 0) cubeIndex |= 16;
-            if (grid.val[5] < 0) cubeIndex |= 32;
-            if (grid.val[6] < 0) cubeIndex |= 64;
-            if (grid.val[7] < 0) cubeIndex |= 128;
-            Vertex vertlist[12];
-            if (param_->edgeTable[cubeIndex] == 0){
-                // std::cout<<"grid "<<xi<<","<<yi<<","<<zi<<","<<" == 0"<<std::endl;
-                emptyCount ++;
-                continue;
-            }
+        std::unordered_map<Vertex, int, VertexHasher, VertexEqual> vertexHashTable;
 
-            /* Find the vertices where the surface intersects the cube */
-            if (param_->edgeTable[cubeIndex] & 1)
-                vertlist[0] =
-                        VertexInterp(0, grid.p[0], grid.p[1], grid.val[0], grid.val[1]);
-            if (param_->edgeTable[cubeIndex] & 2)
-                vertlist[1] =
-                        VertexInterp(0, grid.p[1], grid.p[2], grid.val[1], grid.val[2]);
-            if (param_->edgeTable[cubeIndex] & 4)
-                vertlist[2] =
-                        VertexInterp(0, grid.p[2], grid.p[3], grid.val[2], grid.val[3]);
-            if (param_->edgeTable[cubeIndex] & 8)
-                vertlist[3] =
-                        VertexInterp(0, grid.p[3], grid.p[0], grid.val[3], grid.val[0]);
-            if (param_->edgeTable[cubeIndex] & 16)
-                vertlist[4] =
-                        VertexInterp(0, grid.p[4], grid.p[5], grid.val[4], grid.val[5]);
-            if (param_->edgeTable[cubeIndex] & 32)
-                vertlist[5] =
-                        VertexInterp(0, grid.p[5], grid.p[6], grid.val[5], grid.val[6]);
-            if (param_->edgeTable[cubeIndex] & 64)
-                vertlist[6] =
-                        VertexInterp(0, grid.p[6], grid.p[7], grid.val[6], grid.val[7]);
-            if (param_->edgeTable[cubeIndex] & 128)
-                vertlist[7] =
-                        VertexInterp(0, grid.p[7], grid.p[4], grid.val[7], grid.val[4]);
-            if (param_->edgeTable[cubeIndex] & 256)
-                vertlist[8] =
-                        VertexInterp(0, grid.p[0], grid.p[4], grid.val[0], grid.val[4]);
-            if (param_->edgeTable[cubeIndex] & 512)
-                vertlist[9] =
-                        VertexInterp(0, grid.p[1], grid.p[5], grid.val[1], grid.val[5]);
-            if (param_->edgeTable[cubeIndex] & 1024)
-                vertlist[10] =
-                        VertexInterp(0, grid.p[2], grid.p[6], grid.val[2], grid.val[6]);
-            if (param_->edgeTable[cubeIndex] & 2048)
-                vertlist[11] =
-                        VertexInterp(0, grid.p[3], grid.p[7], grid.val[3], grid.val[7]);
+        int chunk_half = MAX_CHUNK_NUM / 2;
+        int block_total = BLOCK_PER_CHUNK * BLOCK_PER_CHUNK * BLOCK_PER_CHUNK;
+        int total_vox = VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * block_total;
+        // int tri_num = total_vox * 5;
 
-            /* Create the triangle */
-            for (int ti = 0; param_->triTable[cubeIndex][ti] != -1; ti += 3) {
-                Face f;
-                Triangle t;
-                t.p[0] = vertlist[param_->triTable[cubeIndex][ti]];
-                t.p[1] = vertlist[param_->triTable[cubeIndex][ti + 1]];
-                t.p[2] = vertlist[param_->triTable[cubeIndex][ti + 2]];
+        int VoxelPerChunk = BLOCK_PER_CHUNK * VOXEL_PER_BLOCK * BLOCK_PER_CHUNK * VOXEL_PER_BLOCK * BLOCK_PER_CHUNK * VOXEL_PER_BLOCK;
 
-                uint3 grid_size = make_uint3(param_->vox_dim.x, param_->vox_dim.y, param_->vox_dim.z);
-                for (int pi = 0; pi < 3; ++pi) {
-                    int idx = find_vertex(t.p[pi], grid_size, param_->vox_size, hash_table);
-                    if (idx == -1) {
-                        insert_vertex(t.p[pi], vertexCount, grid_size, param_->vox_size, hash_table);
-                        f.vIdx[pi] = vertexCount++;
-                        t.p[pi].x = t.p[pi].x * param_->vox_size + param_->vox_origin.x;
-                        t.p[pi].y = t.p[pi].y * param_->vox_size + param_->vox_origin.y;
-                        t.p[pi].z = t.p[pi].z * param_->vox_size + param_->vox_origin.z;
-                        vertices.push_back(t.p[pi]);
-                    } else
-                        f.vIdx[pi] = idx;
+        for(int x = - chunk_half; x < chunk_half; x ++){
+            for(int y = - chunk_half; y < chunk_half; y ++){
+                for(int z = - chunk_half; z < chunk_half; z ++){
+                    int id = chunkGetLinearIdx(x,y,z);
+                    if(h_chunks[id].isOccupied == false)
+                        h_chunks[id].release();
+
+                    // printf("id chunk %d \n", id);
+                    Triangle* tri_ = h_chunks[id].tri_;
+                    if(tri_ != nullptr){
+                        totalsize += VoxelPerChunk;
+
+
+                        // int count = 0;
+
+                        for(int k = 0; k < total_vox; k ++){
+                            int flag = 0;
+                            for(int i = 0; i < 5; i ++){
+                                int pi = 5 * k + i;
+                                if(!h_chunks[id].tri_[pi].valid)
+                                    continue;
+                                flag = 1;
+                                Face f;
+                                for (int j = 0; j < 3; ++j) {
+                                    if(vertexHashTable.find(tri_[pi].p[j]) == vertexHashTable.end()){
+                                        unsigned int count = vertices.size();
+                                        vertexHashTable[tri_[pi].p[j]] = count;
+                                        f.vIdx[j] = count;
+                                        Vertex vp = tri_[pi].p[j];
+                                        vp.x *= param_->vox_size;
+                                        vp.y *= param_->vox_size;
+                                        vp.z *= param_->vox_size;
+                                        vertices.push_back(vp);
+                                    }else{
+                                        f.vIdx[j] = vertexHashTable[tri_[pi].p[j]];
+                                    }
+                                }
+                                faces.push_back(f);
+                            }
+                            if(flag)
+                                validCount ++;
+                        }
+                    }
+
                 }
-                faces.push_back(f);
             }
         }
 
-        global_vertex = vertices;
-        global_face = faces;
-        global_map = hash_table;
+        // for (size_t i = 0; i < param_->total_vox; ++i) {
+        //     int zi = i / (param_->vox_dim.x * param_->vox_dim.y);
+        //     int yi = (i - zi * param_->vox_dim.x * param_->vox_dim.y) / param_->vox_dim.x;
+        //     int xi = i - zi * param_->vox_dim.x * param_->vox_dim.y - yi * param_->vox_dim.x;
+        //     if (xi == param_->vox_dim.x - 1 || yi == param_->vox_dim.y - 1 || zi == param_->vox_dim.z - 1)
+        //         continue;
 
 
-        std::cout << vertexCount << std::endl;
+
+        //     /* Create the triangle */
+        //     for (int ti = 0; param_->triTable[cubeIndex][ti] != -1; ti += 3) {
+        //         Face f;
+        //         Triangle t;
+        //         t.p[0] = vertlist[param_->triTable[cubeIndex][ti]];
+        //         t.p[1] = vertlist[param_->triTable[cubeIndex][ti + 1]];
+        //         t.p[2] = vertlist[param_->triTable[cubeIndex][ti + 2]];
+
+        //         uint3 grid_size = make_uint3(param_->vox_dim.x, param_->vox_dim.y, param_->vox_dim.z);
+        //         for (int pi = 0; pi < 3; ++pi) {
+        //             int idx = find_vertex(t.p[pi], grid_size, param_->vox_size, hash_table);
+        //             if (idx == -1) {
+        //                 insert_vertex(t.p[pi], vertexCount, grid_size, param_->vox_size, hash_table);
+        //                 f.vIdx[pi] = vertexCount++;
+        //                 t.p[pi].x = t.p[pi].x * param_->vox_size + param_->vox_origin.x;
+        //                 t.p[pi].y = t.p[pi].y * param_->vox_size + param_->vox_origin.y;
+        //                 t.p[pi].z = t.p[pi].z * param_->vox_size + param_->vox_origin.z;
+        //                 vertices.push_back(t.p[pi]);
+        //             } else
+        //                 f.vIdx[pi] = idx;
+        //         }
+        //         faces.push_back(f);
+        //     }
+        // }
+
+
+        std::cout << vertices.size() << std::endl;
         std::ofstream plyFile;
         plyFile.open(outputFileName);
         plyFile << "ply\nformat ascii 1.0\ncomment stanford bunny\nelement vertex ";
@@ -1628,7 +1884,7 @@ namespace ark {
         }
         plyFile.close();
         std::cout << "File saved" << std::endl;
-        std::cout << "totalsize = "<< param_->total_vox << " empty = "<< emptyCount<< " valid = "<< param_->total_vox - emptyCount << std::endl;
+        std::cout << "totalsize = "<< totalsize << " valid = "<< validCount << std::endl;
     }
 
     __host__
@@ -1798,7 +2054,7 @@ namespace ark {
     }
 
     __device__ bool isBlockInCameraFrustum(float3 blocks_pos, float* c2w, MarchingCubeParam* param){
-        return true;
+        // return true;
         // printf("device print\n");
         float3 pCamera = wolrd2cam(c2w, blocks_pos,param);
         float3 pProj = cameraToKinectProj(pCamera, param);
@@ -1835,8 +2091,9 @@ namespace ark {
         vhashing::HashTableBase<int3, VoxelBlock, BlockHasher, BlockEqual> dev_blockmap_,
         unsigned int *d_heapBlockCounter, VoxelBlockPos* d_inBlockPosHeap){
 
-        const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
-        const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+        const unsigned int x = (blockIdx.x * blockDim.x + threadIdx.x) * DDA_STEP;
+        const unsigned int y = (blockIdx.y * blockDim.y + threadIdx.y) * DDA_STEP;
+
 
 
         // if(x != DEBUG_WIDTH || y != DEBUG_HEIGHT)
@@ -1896,7 +2153,7 @@ namespace ark {
             if(rayDir.z == 0.0f || boundarypos.z - raymin.z == 0.0f){ tmax.z = PINF; tDelta.z = PINF;}
 
             unsigned int iter = 0;
-            unsigned int maxLoopIterCount = 1024;
+            unsigned int maxLoopIterCount = 100;
 
             while(iter < maxLoopIterCount){
                 // if(idCurrentBlock.x == 20 && idCurrentBlock.y == 8 && idCurrentBlock.z == 0)
@@ -1906,6 +2163,9 @@ namespace ark {
                 float3 blocks_pos = block2world(idCurrentBlock, param->block_size);
                 if(dev_blockmap_chunks.find(idCurrentBlock) != dev_blockmap_chunks.end()){
                     if(isBlockInCameraFrustum(blocks_pos, c2w, param)){
+
+                        //debug
+                        int3 chunkpos = block2chunk(idCurrentBlock);
                         // printf("idCurrentBlock (%d,%d,%d) at (%f,%f,%f) in camera\n",idCurrentBlock.x, idCurrentBlock.y, idCurrentBlock.z, blocks_pos.x, blocks_pos.y, blocks_pos.z);
                         // printf("\tin camera");
                         // __syncthreads();
@@ -1914,7 +2174,7 @@ namespace ark {
                         // __syncthreads();
                         // int pre_counter = atomicExch(&d_heapBlockCounter[0], LOCK_HASH);
                         // if(dev_blockmap_.find(idCurrentBlock) == dev_blockmap_.end()){
-                            dev_blockmap_[idCurrentBlock] = dev_blockmap_chunks[idCurrentBlock];
+                        dev_blockmap_[idCurrentBlock] = dev_blockmap_chunks[idCurrentBlock];
                             // uint addr = atomicAdd(&d_heapBlockCounter[0], 1);
                             // d_inBlockPosHeap[addr].pos = idCurrentBlock;
                             // printf("%d %d insert (%d,%d,%d)\n", x, y, idCurrentBlock.x, idCurrentBlock.y, idCurrentBlock.z);
@@ -1923,13 +2183,7 @@ namespace ark {
                         // // if (threadIdx.x % 2 == 0)
                         //   release_semaphore(&sem);
                         // __syncthreads();
-                    }else{
-                        // printf("idCurrentBlock (%d,%d,%d) at (%f,%f,%f) ++ chunk\n",idCurrentBlock.x, idCurrentBlock.y, idCurrentBlock.z, blocks_pos.x, blocks_pos.y, blocks_pos.z);
-
                     }
-                }else{
-                    // printf("idCurrentBlock (%d,%d,%d) at (%f,%f,%f) __ chunk\n",idCurrentBlock.x, idCurrentBlock.y, idCurrentBlock.z, blocks_pos.x, blocks_pos.y, blocks_pos.z);
-
                 }
 
                 // // printf("\n");
@@ -1991,7 +2245,7 @@ namespace ark {
         vhashing::HashTableBase<int3, VoxelBlock, BlockHasher, BlockEqual> dev_blockmap_){
         if(blockIdx.x == 0 && threadIdx.x == 0){
             *count = *(dev_blockmap_.heap_counter);
-            printf("count kernel 00 == %d \n", *count);
+            // printf("count kernel 00 == %d \n", *count);
         }
             
     }
@@ -2000,20 +2254,18 @@ namespace ark {
         MarchingCubeParam *param, float* K, float* c2w){
         
         
-        vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
-        bmhi_chunk(*dev_blockmap_chunks);
+        // vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
+        // bmhi_chunk(*dev_blockmap_chunks);
         
 
         {
-            const dim3 grid_size((im_width_ + T_PER_BLOCK - 1) / T_PER_BLOCK, (im_height_ + T_PER_BLOCK - 1) / T_PER_BLOCK, 1);
+            int dda_step = DDA_STEP;
+            const dim3 grid_size((im_width_ / dda_step  + T_PER_BLOCK - 1) / T_PER_BLOCK, (im_height_ / dda_step + T_PER_BLOCK - 1) / T_PER_BLOCK, 1);
             const dim3 block_size(T_PER_BLOCK, T_PER_BLOCK, 1);
-
-
-            printf("Host: HashAssign\n");
 
             unsigned int dst = 0;
             cudaSafeCall(cudaMemcpy(&dst, d_heapBlockCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost));
-            printf("Host: HashAssignKernel before d_heapBlockCounter %d\n", dst);
+            // printf("start HashAssignKernel | d_heapBlockCounter\t%d\n", dst);
 
             HashAssignKernel <<< grid_size, block_size >>> (dev_depth_, im_height_, im_width_, dev_param_, dev_K_, dev_c2w_, *dev_blockmap_chunks, *dev_blockmap_, d_heapBlockCounter, d_inBlockPosHeap);
             
@@ -2021,15 +2273,15 @@ namespace ark {
             // hashCopyKernel <<< 100001, 4 >>> (*dev_blockmap_chunks, *dev_blockmap_);
 
             cudaSafeCall(cudaMemcpy(&dst, d_heapBlockCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost));
-            printf("Host: HashAssign d_heapBlockCounter %d\n", dst);
+            // printf("Host: HashAssign d_heapBlockCounter %d\n", dst);
         }
 
-        cudaSafeCall(cudaDeviceSynchronize()); //debug
+        // cudaSafeCall(cudaDeviceSynchronize()); //debug
                     // stream in
 
        // stream in
-        vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
-        bmhi(*dev_blockmap_);
+        // vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
+        // bmhi(*dev_blockmap_);
         // int count = 0;
         // for(int i = 0; i < *(bmhi.heap_counter); i ++){
         //     for(int j = 0; j < 4; j ++){
@@ -2043,23 +2295,23 @@ namespace ark {
         //         }
         //     }
         // }
-        printf("* get in camera counter %d \n", *(bmhi.heap_counter));
+        // printf("* get in camera counter %d \n", *(bmhi.heap_counter));
 
-        int recount = 0;
-        // stream in
-        vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
-        bmhhh(100001, 4, 400000, int3{999999, 999999, 999999});
+        // int recount = 0;
+        // // stream in
+        // vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
+        // bmhhh(100001, 4, 400000, int3{999999, 999999, 999999});
 
-        // check
-        for (int i=0; i<*(bmhi.heap_counter); i++) {
-            int3 key = bmhi.key_heap[i];
-            // printf("key\t%d\t%d\t%d\n", key.x, key.y, key.z);
-            if(bmhhh.find(key) == bmhhh.end()){
-                VoxelBlock vb;
-                bmhhh[key] = vb;
-                recount ++;
-            }
-        }
+        // // check
+        // for (int i=0; i<*(bmhi.heap_counter); i++) {
+        //     int3 key = bmhi.key_heap[i];
+        //     // printf("key\t%d\t%d\t%d\n", key.x, key.y, key.z);
+        //     if(bmhhh.find(key) == bmhhh.end()){
+        //         VoxelBlock vb;
+        //         bmhhh[key] = vb;
+        //         recount ++;
+        //     }
+        // }
 
         // printf("count out ==== %d\n", recount);
 
@@ -2070,6 +2322,7 @@ namespace ark {
             getHeapCounterKernel <<< 1, 1 >>> (HeapCounter, *dev_blockmap_);
 
         }
+
         // cudaSafeCall(cudaDeviceSynchronize()); //debug
         int dst_insert = 0;
         cudaMemcpy(&dst_insert, HeapCounter, sizeof(int), cudaMemcpyDeviceToHost);
@@ -2079,8 +2332,10 @@ namespace ark {
 
         // int src = 0;
         // cudaMemcpy(HeapCounter, &src, sizeof(int), cudaMemcpyHostToDevice);
+        // printf("finish HashAssignKernel | d_heapBlockCounter\t%d\n", dst_insert);
 
-        printf("src === get  %d\n", dst_insert);
+        cudaFree(HeapCounter);
+
         // vhashing::HashTable<int3, VoxelBlock, BlockHasher, BlockEqual, vhashing::std_memspace>
         // bmhi(*dev_blockmap_);
         // int count = 0;

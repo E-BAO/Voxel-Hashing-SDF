@@ -76,6 +76,19 @@ struct HashTableBase {
 
   }
 
+  	__device__ __host__ 
+  	void clearheap(){
+		if(heap_counter == nullptr)
+
+		#ifdef __CUDA_ARCH__
+			// __syncthreads();
+			int add = atomicExch(&heap_counter[0], 0);
+			// __syncthreads();
+		#else
+				(*heap_counter) = 0;
+		#endif
+  	}
+
 
 	__device__ __host__
 	inline Key EmptyKey() const {

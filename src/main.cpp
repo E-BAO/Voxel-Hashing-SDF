@@ -18,6 +18,8 @@
 //#include <BridgeRSD435.h>
 #include <PointCloudGenerator.h>
 
+#include <time.h>
+
 //OpenGL global variable
 float window_width = 800;
 float window_height = 800;
@@ -115,11 +117,14 @@ void init() {
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
 
+    gluLookAt(0,20,0,0,0,0,0,1,0);
     gluPerspective(45.0, (float) window_width / window_height, 10.0f, 100.0);
 
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     glTranslatef(0.0f, 0.0f, -3.0f);
+    glRotatef(90,1.0,0.0,0.0);
+
 }
 
 void display_func() {
@@ -169,6 +174,8 @@ void reshape_func(GLint width, GLint height) {
 
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
+    // glRotatef(90,0.0,1.0,0.0);
+
     glTranslatef(0.0f, 0.0f, -3.0f);
 }
 
@@ -194,6 +201,38 @@ int countFiles(string filename){
 }
 
 
+// void application_thread() {
+//     pointCloudGenerator->Start();
+
+//     // Main loop, loads key frames
+//     int tframe = 0;
+//     int empty = 0;
+//     while (true && !stopSaveFrame) {
+
+//         if(empty > 40)
+//             break;
+
+//         ark::RGBDFrame frame = saveFrame->frameLoad(tframe);
+//         tframe++;
+
+//         if(frame.frameId == -1){
+//             empty++;
+//             continue;
+//         }
+
+//         cv::cvtColor(frame.imRGB, frame.imRGB, cv::COLOR_BGR2RGB);
+
+//         cv::Mat Twc = frame.mTcw.inv();
+
+//         pointCloudGenerator->PushFrame(frame); 
+
+//         empty = 0;
+//     }
+//     pointCloudGenerator->RequestStop();
+//     pointCloudGenerator->SavePly();
+// }
+
+
 void application_thread() {
 //    slam->Start();
     pointCloudGenerator->Start();
@@ -202,13 +241,16 @@ void application_thread() {
     // Main loop
     int tframe = 0;
     int empty = 0;
-    while (tframe < 1) {
+
+    clock_t t1 = clock();
+
+    while (tframe < 2025) {
 
         if(empty == 5)
             break;
 
         ark::RGBDFrame frame = saveFrame->frameLoad(tframe);
-        tframe ++ ;
+        tframe += 20;
 
         if(frame.frameId == -1){
             empty ++;
@@ -234,8 +276,10 @@ void application_thread() {
 
             // pointCloudGenerator->Reproject(frame.imRGB, frame.imDepth, Twc);
 
-        pointCloudGenerator->OnKeyFrameAvailable(frame);
+        pointCloudGenerator->PushFrame(frame); //OnKeyFrameAvailable(frame);
     }
+
+    cout <<"frames: 101\t" << "time:"<< (clock() - t1) * 1.0 / CLOCKS_PER_SEC<<"s"<< endl;
 }
 
 void keyboard_func(unsigned char key, int x, int y) {

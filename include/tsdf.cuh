@@ -37,11 +37,11 @@
 #define PINF __int_as_float(0x7f800000)
 #endif
 
-#define VOXEL_PER_BLOCK 4
+#define VOXEL_PER_BLOCK 5
 #define BLOCK_PER_CHUNK 8
 #define MAX_CPU2GPU_BLOCKS 1000000
 #define MAX_CHUNK_NUM 128
-#define CHUNK_RADIUS 6.0
+#define CHUNK_RADIUS 4.0
 
 __host__
 static void FatalError(const int lineNumber = 0) {
@@ -76,9 +76,36 @@ namespace ark {
         Vertex(float xi, float yi, float zi) : x(xi), y(yi), z(zi) {}
     };
 
+    struct VertexEqual
+    {
+        bool operator()(Vertex v1, Vertex v2) const{
+            return v1.x == v2.x && v1.y == v2.y && v1.z == v2.z;
+        }
+        
+    };
+
+    struct VertexHasher
+    {
+        size_t operator()(Vertex v) const{
+            const size_t p[] = {
+                73856093,
+                19349669,
+                83492791
+            };
+            return ((size_t)v.x * p[0]) ^
+                         ((size_t)v.y * p[1]) ^
+                         ((size_t)v.z * p[2]);
+        }
+    };
+
+    __host__ __device__
+    bool operator==(const Vertex &a, const Vertex &b);
+
     struct Triangle {
         Vertex p[3];
         bool valid;
+
+        Triangle():valid(false){}
     };
 
     struct Face {
@@ -140,19 +167,24 @@ namespace ark {
     struct Chunk{
         VoxelBlock *blocks;
         VoxelBlockPos *blocksPos;
-        bool GPUorCPU; // CPU 0  GPU 1
+        Triangle* tri_;
+        bool isOccupied;
+
        __host__
-        Chunk():GPUorCPU(0), blocks(NULL), blocksPos(NULL){}
+        Chunk(): blocks(nullptr), blocksPos(nullptr), tri_(nullptr), isOccupied(false){}
 
         __host__
         void create(int3 pos){
+            // printf("++create chunk at (%d,%d,%d)\n", pos.x, pos.y, pos.z);
             int block_total = BLOCK_PER_CHUNK * BLOCK_PER_CHUNK * BLOCK_PER_CHUNK;
-            if(blocks == NULL){
+            int total_vox = VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * VOXEL_PER_BLOCK * block_total;
+
+            if(blocks == nullptr){
                 blocks = new VoxelBlock[block_total];
             }
             int3 block_start = pos * make_int3(BLOCK_PER_CHUNK);
 
-            if(blocksPos == NULL){
+            if(blocksPos == nullptr){
                 blocksPos = new VoxelBlockPos[block_total];
                 for(int x = 0; x < BLOCK_PER_CHUNK; x ++)
                     for(int y = 0; y < BLOCK_PER_CHUNK; y ++)
@@ -160,6 +192,28 @@ namespace ark {
                             blocksPos[(x * BLOCK_PER_CHUNK + y) * BLOCK_PER_CHUNK + z].pos = block_start + make_int3(x,y,z);
                         }
             }
+
+            tri_ = new Triangle[total_vox * 5];// (Triangle *) malloc(sizeof(Triangle) * total_vox * 5);
+        }
+
+        __host__
+        void release(){
+            if(blocks == nullptr)
+                return;
+
+            // printf("--release chunk at\n");
+            int3 startpos = blocksPos[0].pos;
+            int3 pos = make_int3(startpos.x/ BLOCK_PER_CHUNK, startpos.y / BLOCK_PER_CHUNK, startpos.z/ BLOCK_PER_CHUNK);
+            // printf(" (%d,%d,%d)\n", pos.x, pos.y, pos.z);
+
+            delete[] blocks;
+            delete[] blocksPos;
+            delete[] tri_;
+            isOccupied = false;
+
+            blocks = nullptr;
+            blocksPos = nullptr;
+            tri_ = nullptr;
         }
     };
 
@@ -503,6 +557,7 @@ namespace ark {
         float K_[3 * 3];
         float c2w_[4 * 4];
         Triangle *tri_ = nullptr;
+        Triangle* hash_tri_ = nullptr;
         float chunk_size;
 
 
@@ -522,6 +577,7 @@ namespace ark {
         std::mutex tri_mutex_;
         //lock for saving ply
         std::mutex tsdf_mutex_;
+        std::mutex chunk_mutex_;
 
         std::vector<Vertex> global_vertex;
         std::vector<Face> global_face;
@@ -538,10 +594,12 @@ namespace ark {
         VoxelBlockPos* d_inBlockPos;
 
         VoxelBlockPos* d_inBlockPosHeap;
+        VoxelBlockPos* h_inBlockPosHeap;
 
         unsigned int *d_outBlockCounter;
         unsigned int *d_heapBlockCounter;
         unsigned int h_inChunkCounter;
+        unsigned int h_heapBlockCounter;
 
     public:
         __host__

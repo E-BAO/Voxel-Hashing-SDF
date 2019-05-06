@@ -136,6 +136,12 @@ namespace ark {
         mpGpuTsdfGenerator->SavePLY(filename);
     }
 
+    void PointCloudGenerator::PushFrame(const RGBDFrame &frame) {
+        cv::Mat Twc = frame.mTcw.inv();
+
+        Reproject(frame.imRGB, frame.imDepth, Twc);
+    }
+
     void PointCloudGenerator::OnKeyFrameAvailable(const RGBDFrame &keyFrame) {
         if (mMapRGBDFrame.find(keyFrame.frameId) != mMapRGBDFrame.end())
             return;
