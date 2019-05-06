@@ -1,4 +1,4 @@
-# TSDF-267
+# Voxel Hashing SDF
 
 ## Build
 ```bash
